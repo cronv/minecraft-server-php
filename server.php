@@ -175,6 +175,18 @@ class NBTWriter {
         return $this;
     }
 
+    /** Запись TAG_Float (4 байта, big-endian). */
+    public function writeFloat(float $value): self {
+        $this->buffer .= pack('G', $value);
+        return $this;
+    }
+
+    /** Запись TAG_Double (8 байт, big-endian — в NBT всегда network byte order). */
+    public function writeDouble(float $value): self {
+        $this->buffer .= pack('E', $value);
+        return $this;
+    }
+
     public function writeSimpleTags(): string {
         $this->buffer = '';
 
@@ -438,12 +450,12 @@ class PacketFactory {
         // coordinate_scale
         $writer->writeByte(6); // TAG_Double
         $writer->writeString('coordinate_scale');
-        $writer->buffer .= pack('d', 1.0); // native double, little-endian → but NBT expects big-endian
+        $writer->writeDouble(1.0);
 
         // ambient_light
         $writer->writeByte(6); // TAG_Double
         $writer->writeString('ambient_light');
-        $writer->buffer .= pack('d', 0.0);
+        $writer->writeDouble(0.0);
 
         // has_ceiling
         $writer->writeByte(1); // TAG_Byte
@@ -606,6 +618,67 @@ class PacketFactory {
     public function createFeatureFlags(): string {
         // Empty feature flags list
         return VarInt::write(0);
+    }
+
+    /**
+     * Registry Data (0x07) в состоянии Configuration:
+     * VarInt(2) + ("minecraft:dimension_type", NBT-компаунд) + ("minecraft:worldgen/biome", NBT-компаунд).
+     */
+    public function createRegistryData(): string {
+        static $cache = null;
+
+        if ($cache === null) {
+            $registryNBT = $this->createDimensionRegistryNBT();
+            $biomeNBT = self::createBiomeRegistryNBT();
+
+            $cache = VarInt::write(2)
+                . StringHandler::write('minecraft:dimension_type') . $registryNBT
+                . StringHandler::write('minecraft:worldgen/biome') . $biomeNBT;
+        }
+
+        return $cache;
+    }
+
+    private static function createBiomeRegistryNBT(): string {
+        $w = new NBTWriter();
+        $w->reset();
+
+        // Корневой компаунд (в формате Network NBT — без имени у корня,
+        // но здесь используем пустое имя как и в dimension registry)
+        $w->writeByte(10); // TAG_Compound
+        $w->writeString('');
+
+        $w->writeByte(9);  // TAG_List
+        $w->writeString('value');
+        $w->writeByte(10); // элемент — TAG_Compound
+        $w->writeInt(64);  // 64 биом (индекс 1 = plains, как в чанках)
+
+        for ($i = 0; $i < 64; $i++) {
+            $w->writeByte(10); $w->writeString('');           // element compound
+            $w->writeByte(3);  $w->writeString('id');         $w->writeInt($i);
+            $w->writeByte(8);  $w->writeString('name');       $w->writeString('minecraft:plains');
+            $w->writeByte(10); $w->writeString('element');
+
+            $w->writeByte(8); $w->writeString('precipitation'); $w->writeString('rain');
+            $w->writeByte(5); $w->writeString('depth'); $w->writeFloat(0.125);
+            $w->writeByte(5); $w->writeString('temperature'); $w->writeFloat(0.8);
+            $w->writeByte(1); $w->writeString('downfall'); $w->writeByte(1);
+            $w->writeByte(8); $w->writeString('category'); $w->writeString('plains');
+
+            $w->writeByte(10); $w->writeString('effects');
+            $w->writeByte(3); $w->writeString('sky_color'); $w->writeInt(0x797FF);
+            $w->writeByte(3); $w->writeString('fog_color'); $w->writeInt(0xC0D7F);
+            $w->writeByte(3); $w->writeString('water_color'); $w->writeInt(0x3F76E4);
+            $w->writeByte(3); $w->writeString('water_fog_color'); $w->writeInt(0x50533);
+            $w->writeByte(0); // end effects
+
+            $w->writeByte(9); $w->writeString('tags');
+            $w->writeByte(8); $w->writeInt(0); // TAG_End type, 0 элементов
+            $w->writeByte(0); // end element compound
+        }
+
+        $w->writeByte(0); // end root
+        return $w->getBuffer();
     }
 
     public function createPlayerInfo(int $clientId, string $username, string $uuid): string {
@@ -787,6 +860,14 @@ class ConnectionManager {
         return $this->connections[$clientId]['state'] ?? 'handshake';
     }
 
+    public function getConnectionUsername(int $clientId): string {
+        return $this->connections[$clientId]['username'] ?? '';
+    }
+
+    public function getConnectionUUID(int $clientId): string {
+        return $this->connections[$clientId]['uuid'] ?? '';
+    }
+
     public function setConnectionState(int $clientId, string $state): void {
         if (isset($this->connections[$clientId])) {
             $this->connections[$clientId]['state'] = $state;
@@ -896,11 +977,70 @@ class LoginHandler implements PacketHandler {
             $uuidBytes = UUIDGenerator::toBinary($uuid);
             $usernameBytes = StringHandler::write($username);
 
-            $this->server->sendPacket($clientId, 0x02, $uuidBytes . $usernameBytes);
+            // Protocol 763 (1.20.1) Login Success: UUID + Username + Properties count (0)
+            // (в 1.20.2+ добавляется ещё Boolean "Strict Error Handling")
+            $this->server->sendPacket($clientId, 0x02, $uuidBytes . $usernameBytes . VarInt::write(0));
             PacketLogger::logInfo("Login Success отправлен клиенту $clientId");
 
-            $this->server->setConnectionState($clientId, 'play');
-            $this->server->sendGamePackets($clientId, $username, $uuid);
+            // ВАЖНО: в 1.20.1 после Login Success клиент ОЖИДАЕТ пакет 0x03
+            // Login Acknowledged (client-bound), и только затем переходит в
+            // состояние Configuration. Игровые пакеты шлём из ConfigHandler.
+            $this->server->setConnectionState($clientId, 'login_ack');
+        }
+    }
+}
+
+class LoginAckHandler implements PacketHandler {
+    private MinecraftServer $server;
+
+    public function __construct(MinecraftServer $server) {
+        $this->server = $server;
+    }
+
+    public function handle(int $clientId, string $packetData): void {
+        $offset = 0;
+        $packetId = VarInt::read($packetData, $offset);
+
+        // 0x03 = Login Acknowledged (client-bound в Protocol 763)
+        if ($packetId === 0x03) {
+            PacketLogger::logInfo("Login Acknowledged получен от клиента $clientId — переходим в Configuration");
+            $this->server->setConnectionState($clientId, 'config');
+            // Отправляем конфигурационные пакеты и Finish Configuration.
+            $this->server->sendConfigPackets($clientId);
+        }
+    }
+}
+
+class ConfigHandler implements PacketHandler {
+    private MinecraftServer $server;
+
+    public function __construct(MinecraftServer $server) {
+        $this->server = $server;
+    }
+
+    public function handle(int $clientId, string $packetData): void {
+        $offset = 0;
+        $packetId = VarInt::read($packetData, $offset);
+
+        switch ($packetId) {
+            case 0x02: // Plugin Message (brand) — отвечаем Empty(0x02)/MC|Brand
+                $this->server->sendPacket(
+                    $clientId,
+                    0x02,
+                    StringHandler::write('MC|Brand') . "\x01" . StringHandler::write('vanilla')
+                );
+                break;
+
+            case 0x03: // Finish Configuration Acknowledgement — можно в Play
+                PacketLogger::logInfo("Клиент $clientId подтвердил конфигурацию — вход в Play");
+                $username = $this->server->getConnectionUsername($clientId);
+                $uuid = $this->server->getConnectionUUID($clientId);
+                $this->server->setConnectionState($clientId, 'play');
+                $this->server->sendGamePackets($clientId, $username, $uuid);
+                break;
+
+            case 0x00: // Client Information — просто запоминаем
+                break;
         }
     }
 }
@@ -1001,6 +1141,8 @@ class MinecraftServer {
         $this->packetDispatcher->registerHandler('handshake', new HandshakeHandler($this));
         $this->packetDispatcher->registerHandler('status', new StatusHandler($this, $this->packetFactory));
         $this->packetDispatcher->registerHandler('login', new LoginHandler($this, $this->packetFactory));
+        $this->packetDispatcher->registerHandler('login_ack', new LoginAckHandler($this));
+        $this->packetDispatcher->registerHandler('config', new ConfigHandler($this));
         $this->packetDispatcher->registerHandler('play', new PlayHandler($this));
 
         PacketLogger::clearLog();
@@ -1084,6 +1226,42 @@ class MinecraftServer {
         }
     }
 
+    /**
+     * Пакеты состояния Configuration (Protocol 763, серверная сторона).
+     * Порядок: Registry Data -> Feature Flags -> Update Tags -> Finish Configuration.
+     * После Finish Configuration клиент обязан ответить 0x03 Acknowledge Finish Configuration.
+     */
+    public function sendConfigPackets(int $clientId): void {
+        if (!$this->connectionManager->isClientConnected($clientId)) {
+            return;
+        }
+
+        try {
+            // 1. Registry Data (0x07) — dimension registry + biomes
+            $registryData = $this->packetFactory->createRegistryData();
+            $this->sendPacket($clientId, 0x07, $registryData);
+            PacketLogger::logInfo("Registry Data (0x07) отправлен клиенту $clientId");
+
+            // 2. Feature Flags (0x0C) — в Protocol 763 ID = 0x0C (не 0x08!)
+            $featureFlagsData = $this->packetFactory->createFeatureFlags();
+            $this->sendPacket($clientId, 0x0C, $featureFlagsData);
+            PacketLogger::logInfo("Feature Flags (0x0C) отправлен клиенту $clientId");
+
+            // 3. Update Tags (0x0D) — пустые теги реестров
+            $nbtWriter = new NBTWriter();
+            $tagsData = $nbtWriter->writeSimpleTags();
+            $this->sendPacket($clientId, 0x0D, $tagsData);
+            PacketLogger::logInfo("Update Tags (0x0D) отправлен клиенту $clientId");
+
+            // 4. Finish Configuration (0x03) — VarInt(0) = не отправляем Unknown Server Plugin
+            $this->sendPacket($clientId, 0x03, VarInt::write(0));
+            PacketLogger::logInfo("Finish Configuration (0x03) отправлен клиенту $clientId — ждём подтверждения");
+        } catch (Exception $e) {
+            PacketLogger::logError("Ошибка при отправке конфигурационных пакетов: " . $e->getMessage());
+            $this->connectionManager->closeConnection($clientId);
+        }
+    }
+
     public function sendGamePackets(int $clientId, string $username, string $uuid): void {
         PacketLogger::logInfo("Начинаю отправку игровых пакетов клиенту $clientId...");
 
@@ -1095,22 +1273,25 @@ class MinecraftServer {
         try {
             PacketLogger::logInfo("Отправка игровых пакетов для Minecraft 1.20.1...");
 
-            // 1. Feature Flags (0x08)
-            $featureFlagsData = $this->packetFactory->createFeatureFlags();
-            $this->sendPacket($clientId, 0x08, $featureFlagsData);
-            PacketLogger::logInfo("Feature Flags (0x08) отправлен клиенту $clientId");
-            $this->sleepWithCheck(50000, $clientId); // 50ms
-
-            if (!$this->connectionManager->isClientConnected($clientId)) {
-                PacketLogger::logError("Соединение разорвано перед отправкой Join Game");
-                return;
-            }
-
-            // 2. Join Game (0x26) - ИСПРАВЛЕННЫЙ ФОРМАТ
+            // 1. Join Game (0x26) — ИСПРАВЛЕННЫЙ ФОРМАТ
             $joinGameData = $this->packetFactory->createJoinGame($clientId, $uuid);
             $this->sendPacket($clientId, 0x26, $joinGameData);
             PacketLogger::logInfo("Join Game (0x26) отправлен клиенту $clientId");
             $this->sleepWithCheck(50000, $clientId); // 50ms
+
+            if (!$this->connectionManager->isClientConnected($clientId)) {
+                PacketLogger::logError("Соединение разорвано перед отправкой Plugin Message");
+                return;
+            }
+
+            // 2. Plugin Message / MC|Brand (0x04) — клиент 1.20.1 ждёт его сразу после Join Game
+            $this->sendPacket(
+                $clientId,
+                0x04,
+                StringHandler::write('MC|Brand') . "\x01" . StringHandler::write('vanilla')
+            );
+            PacketLogger::logInfo("Plugin Message MC|Brand (0x04) отправлен клиенту $clientId");
+            $this->sleepWithCheck(30000, $clientId);
 
             if (!$this->connectionManager->isClientConnected($clientId)) {
                 PacketLogger::logError("Соединение разорвано перед отправкой Player Info");
@@ -1121,73 +1302,50 @@ class MinecraftServer {
             $playerInfoData = $this->packetFactory->createPlayerInfo($clientId, $username, $uuid);
             $this->sendPacket($clientId, 0x32, $playerInfoData);
             PacketLogger::logInfo("Player Info (0x32) отправлен клиенту $clientId");
-            $this->sleepWithCheck(30000, $clientId); // 30ms
-
-            if (!$this->connectionManager->isClientConnected($clientId)) {
-                PacketLogger::logError("Соединение разорвано перед отправкой Tags");
-                return;
-            }
-
-            // 4. Tags (0x5A)
-            $nbtWriter = new NBTWriter();
-            $tagsData = $nbtWriter->writeSimpleTags();
-            $this->sendPacket($clientId, 0x5A, $tagsData);
-            PacketLogger::logInfo("Tags (0x5A) отправлен клиенту $clientId");
-            $this->sleepWithCheck(50000, $clientId); // 50ms
+            $this->sleepWithCheck(30000, $clientId);
 
             if (!$this->connectionManager->isClientConnected($clientId)) {
                 PacketLogger::logError("Соединение разорвано перед отправкой Spawn Position");
                 return;
             }
 
-            // 5. Spawn Position (0x41)
+            // 4. Spawn Position (0x4B) — в Protocol 763 этот пакет имеет ID 0x4B
             $spawnPositionData = $this->packetFactory->createSpawnPosition($clientId);
-            $this->sendPacket($clientId, 0x41, $spawnPositionData);
-            PacketLogger::logInfo("Spawn Position (0x41) отправлен клиенту $clientId");
-            $this->sleepWithCheck(30000, $clientId); // 30ms
-
-            if (!$this->connectionManager->isClientConnected($clientId)) {
-                PacketLogger::logError("Соединение разорвано перед отправкой Chunk Data");
-                return;
-            }
-
-            // 6. Chunk Data (0x22)
-            $chunkData = WorldGenerator::generateFlatChunk();
-            $this->sendPacket($clientId, 0x22, $chunkData);
-            PacketLogger::logInfo("Chunk Data (0x22) отправлен клиенту $clientId");
-            $this->sleepWithCheck(50000, $clientId); // 50ms
+            $this->sendPacket($clientId, 0x4B, $spawnPositionData);
+            PacketLogger::logInfo("Spawn Position (0x4B) отправлен клиенту $clientId");
+            $this->sleepWithCheck(30000, $clientId);
 
             if (!$this->connectionManager->isClientConnected($clientId)) {
                 PacketLogger::logError("Соединение разорвано перед отправкой Player Position");
                 return;
             }
 
-            // 7. Player Position and Look (0x37)
+            // 5. Player Position and Look (0x38) — в Protocol 763 ID = 0x38
             $positionData = $this->packetFactory->createPlayerPosition($clientId);
-            $this->sendPacket($clientId, 0x37, $positionData);
-            PacketLogger::logInfo("Player Position and Look (0x37) отправлен клиенту $clientId");
-            $this->sleepWithCheck(30000, $clientId); // 30ms
+            $this->sendPacket($clientId, 0x38, $positionData);
+            PacketLogger::logInfo("Player Position and Look (0x38) отправлен клиенту $clientId");
+            $this->sleepWithCheck(30000, $clientId);
 
             if (!$this->connectionManager->isClientConnected($clientId)) {
                 PacketLogger::logError("Соединение разорвано перед отправкой Player Abilities");
                 return;
             }
 
-            // 8. Player Abilities (0x39)
+            // 6. Player Abilities (0x3A) — в Protocol 763 ID = 0x3A
             $abilitiesData = $this->packetFactory->createPlayerAbilities($clientId);
-            $this->sendPacket($clientId, 0x39, $abilitiesData);
-            PacketLogger::logInfo("Player Abilities (0x39) отправлен клиенту $clientId");
-            $this->sleepWithCheck(30000, $clientId); // 30ms
+            $this->sendPacket($clientId, 0x3A, $abilitiesData);
+            PacketLogger::logInfo("Player Abilities (0x3A) отправлен клиенту $clientId");
+            $this->sleepWithCheck(30000, $clientId);
 
             if (!$this->connectionManager->isClientConnected($clientId)) {
                 PacketLogger::logError("Соединение разорвано перед отправкой Keep Alive");
                 return;
             }
 
-            // 9. Keep Alive (0x1F)
+            // 7. Keep Alive (0x21) — в Protocol 763 ID = 0x21
             $keepAliveData = $this->packetFactory->createKeepAlive($clientId);
-            $this->sendPacket($clientId, 0x1F, $keepAliveData);
-            PacketLogger::logInfo("Keep Alive (0x1F) отправлен клиенту $clientId");
+            $this->sendPacket($clientId, 0x21, $keepAliveData);
+            PacketLogger::logInfo("Keep Alive (0x21) отправлен клиенту $clientId");
 
             $world = $this->config->getWorld();
             PacketLogger::logInfo("🌍 Мир загружен для клиента $clientId, игрок на позиции {$world['spawn']['x']}, {$world['spawn']['y']}, {$world['spawn']['z']}");
@@ -1240,6 +1398,14 @@ class MinecraftServer {
 
     public function setConnectionUUID(int $clientId, string $uuid): void {
         $this->connectionManager->setConnectionUUID($clientId, $uuid);
+    }
+
+    public function getConnectionUsername(int $clientId): string {
+        return $this->connectionManager->getConnectionUsername($clientId);
+    }
+
+    public function getConnectionUUID(int $clientId): string {
+        return $this->connectionManager->getConnectionUUID($clientId);
     }
 
     public function __destruct() {
