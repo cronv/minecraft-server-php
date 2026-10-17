@@ -34,120 +34,362 @@ declare(strict_types=1);
  * ID пакетов Protocol 763. Разделены по направлениям, потому что в
  * Configuration/Play состояния S2C и C2S таблицы ID НЕ совпадают.
  */
+/**
+ * ВНИМАНИЕ: таблица ниже — ЭТАЛОН Protocol 763 (Minecraft 1.20.1).
+ * Префиксы: CB_ = Clientbound (S→C), SB_ = Serverbound (C→S).
+ * Разделённых состояний Configuration/Login ACK в 1.20.1 нет: переход
+ * Login → Play происходит напрямую после SB_LOGIN_LOGIN_ACKNOWLEDGED (0x03).
+ */
 final class PacketId
 {
-    // --- Server-bound (C→S) Login ---
-    public const CS_LOGIN_START = 0x00;
-    public const CS_LOGIN_ACKNOWLEDGED = 0x03;
+    // =========================================================================
+    // Handshake (Serverbound, C→S)
+    // =========================================================================
+    public const SB_HANDSHAKE_INTENTION = 0x00;
 
-    // --- Server-bound (C→S) Configuration (Protocol 763, по minecraft-data) ---
-    public const CS_CONFIG_PLUGIN_MESSAGE = 0x00;
-    public const CS_CONFIG_FINISHED_ACK = 0x01;
-    public const CS_CONFIG_KEEP_ALIVE = 0x02;
-    public const CS_CONFIG_PONG = 0x03;
-    public const CS_CONFIG_RESOURCE_PACK_STATUS = 0x04;
-    public const CS_CONFIG_GENERATE_STRUCTURE = 0x05;
-    public const CS_CONFIG_DELETE_STRUCTURE = 0x06;
-    public const CS_CONFIG_KNOWN_PACKS = 0x07;
-    public const CS_CONFIG_CLIENT_INFORMATION = 0x0B;
-    public const CS_CONFIG_SELECT_KNOWN_PACKS = 0x0D;
-    public const CS_CONFIG_MODERN_BRAND = 0x0F;
+    // =========================================================================
+    // Status State
+    // =========================================================================
+    public const CB_STATUS_RESPONSE = 0x00;   // Server → Client
+    public const CB_STATUS_PONG = 0x01;       // Server → Client
+    public const SB_STATUS_REQUEST = 0x00;    // Client → Server
+    public const SB_STATUS_PING = 0x01;       // Client → Server
 
-    // --- Server-bound (C→S) Play (Protocol 763) ---
-    public const CS_PLAY_CONFIRM_TELEPORT = 0x00;
-    public const CS_PLAY_TELEPORT_CONFIRM = 0x00; // алиас (то же значение)
-    public const CS_PLAY_CLIENT_TICK = 0x04;
-    public const CS_PLAY_POSITION = 0x1C;
-    public const CS_PLAY_POSITION_LOOK = 0x06;
-    public const CS_PLAY_LOOK = 0x07;
-    public const CS_PLAY_FLYING = 0x08;
-    public const CS_PLAY_SETTINGS = 0x09;
-    public const CS_PLAY_WORLD_INTERACTION = 0x0A;
-    public const CS_PLAY_SWING_ARM = 0x1B;
-    public const CS_PLAY_KEEP_ALIVE = 0x12;
-    public const CS_PLAY_PONG = 0x15;
-    public const CS_PLAY_CUSTOM_PAYLOAD = 0x16;
+    // =========================================================================
+    // Login State
+    // =========================================================================
+    // Clientbound Login (Server → Client)
+    public const CB_LOGIN_DISCONNECT = 0x00;
+    public const CB_LOGIN_ENCRYPTION_REQUEST = 0x01;
+    public const CB_LOGIN_SUCCESS = 0x02;
+    public const CB_LOGIN_SET_COMPRESSION = 0x03;
+    public const CB_LOGIN_PLUGIN_REQUEST = 0x04;
 
-    // --- Client-bound (S→C) Login ---
-    public const LOGIN_SUCCESS = 0x02;
+    // Serverbound Login (Client → Server)
+    public const SB_LOGIN_START = 0x00;
+    public const SB_LOGIN_ENCRYPTION_RESPONSE = 0x01;
+    public const SB_LOGIN_PLUGIN_RESPONSE = 0x02;
+    public const SB_LOGIN_LOGIN_ACKNOWLEDGED = 0x03;
 
-    // --- Client-bound (S→C) Configuration (Protocol 763) ---
-    public const CONFIG_KEEP_ALIVE = 0x01;
-    public const CONFIG_PING = 0x02;
-    public const CONFIG_PLUGIN_MESSAGE = 0x03;
-    public const CONFIG_DISCONNECT = 0x04;
-    public const CONFIG_FINISH_CONFIGURATION = 0x05;
-    public const CONFIG_RESOURCE_PACK = 0x07;
-    public const CONFIG_TRANSFER_HANDLER = 0x08;
-    public const CONFIG_FEATURE_FLAGS = 0x09;
-    public const CONFIG_REGISTRY_DATA = 0x0A;
-    public const CONFIG_REMOVE_RESOURCE_PACK = 0x0B;
-    public const CONFIG_UPDATE_TAGS = 0x0C;
-    public const CONFIG_KNOWN_PACKS = 0x0E;
+    // =========================================================================
+    // Configuration State (в Protocol 763 не используется; таблица приведена
+    // для соответствия документации Protocol 763/764 и будущих версий)
+    // =========================================================================
+    // Clientbound Configuration (Server → Client)
+    public const CB_CONFIG_PLUGIN_MESSAGE = 0x00;
+    public const CB_CONFIG_DISCONNECT = 0x01;
+    public const CB_CONFIG_FINISH_CONFIGURATION = 0x02;
+    public const CB_CONFIG_KEEP_ALIVE = 0x03;
+    public const CB_CONFIG_PING = 0x04;
+    public const CB_CONFIG_RESET_CHAT = 0x05;
+    public const CB_CONFIG_REGISTRY_DATA = 0x06;
+    public const CB_CONFIG_REMOVE_RESOURCE_PACK = 0x07;
+    public const CB_CONFIG_ADD_RESOURCE_PACK = 0x08;
+    public const CB_CONFIG_STORE_COOKIE = 0x09;
+    public const CB_CONFIG_TRANSFER = 0x0A;
+    public const CB_CONFIG_UPDATE_ENABLED_FEATURES = 0x0B;
+    public const CB_CONFIG_UPDATE_TAGS = 0x0C;
+    public const CB_CONFIG_KNOWN_PACKS = 0x0D;
 
-    // --- Client-bound (S→C) Play (Protocol 763, по minecraft-data/protocol.json) ---
-    public const PLAY_SPAWN_ENTITY = 0x01;
-    public const PLAY_DECLARE_COMMANDS = 0x07;
-    public const PLAY_MULTI_BLOCK_CHANGE = 0x08;
-    public const PLAY_GAME_EVENT = 0x0A;
-    public const PLAY_EMPTY_CHUNK_SNAPSHOT = 0x0D;
-    public const PLAY_SET_XP = 0x11;
-    public const PLAY_INITIALIZE_WINDOW = 0x14;
-    public const PLAY_KEEP_ALIVE = 0x1F;
-    public const PLAY_WORLD_EVENTS = 0x20;
-    public const PLAY_SECTION_BLOCKS_UPDATE = 0x22;
-    public const PLAY_SYSTEM_CHAT_MESSAGE = 0x23;
-    public const PLAY_PLAYER_INFO = 0x25;
-    public const PLAY_LIMITED_PACKET_SIZE = 0x27;
-    public const PLAY_SET_TITLE_TEXT = 0x28;
-    public const PLAY_ADD_PLAYER = 0x29;
-    public const PLAY_JOIN_GAME = 0x2A;
-    public const PLAY_PLAYER_POSITION = 0x2C;
-    public const PLAY_PLAYER_ABILITIES = 0x2E;
-    public const PLAY_PLAYER_COMPOSITION = 0x2F;
-    public const PLAY_SET_HEALTH = 0x30;
-    public const PLAY_SET_PASSIVES = 0x31;
-    public const PLAY_HURT_ARMOR = 0x32;
-    public const PLAY_SERVER_DIFFICULTY = 0x36;
-    public const PLAY_SIMULATION_DISTANCE = 0x3D;
-    public const PLAY_POSITION_SYNC = 0x40;
-    public const PLAY_SET_SLOT = 0x42;
-    public const PLAY_ACTIONBAR_TEXT = 0x46;
-    public const PLAY_SET_DEFAULT_SPAWN_POSITION = 0x49;
-    public const PLAY_MAP_ID = 0x4B;
-    public const PLAY_REQUEST_PERMISSIONS = 0x4D;
-    public const PLAY_TITLE_SUBTITLE = 0x55;
-    public const PLAY_TIME_UPDATE = 0x5A;
-    public const PLAY_SET_CRAFT_RESULT = 0x57;
-    public const PLAY_PLUGIN_MESSAGE = 0x18;
-    public const PLAY_ACKNOWLEDGE_CHUNKS = 0x06;
-    public const PLAY_CHUNK_DATA = 0x21;
-    public const PLAY_UNLOAD_CHUNK = 0x1E;
-    public const PLAY_BLOCK_UPDATE = 0x0B;
-    public const PLAY_HELD_ITEM_CHANGE = 0x48;
-    public const PLAY_CLOSE_CONTAINER = 0x12;
-    public const PLAY_OPEN_SCREEN = 0x13;
-    public const PLAY_CONTAINER_PROPERTY = 0x15;
-    public const PLAY_DELETE_ENTITY = 0x3F;
-    public const PLAY_CHANGE_GAME_MODE = 0x1B;
-    public const PLAY_SET_COOLDOWN = 0x45;
-    public const PLAY_CUSTOM_PAYLOAD = 0x17;
-    public const PLAY_STOP_SOUND = 0x54;
-    public const PLAY_CLEAR_TITLES = 0x59;
-    public const PLAY_REMOVE_RESOURCE_PACK = 0x4E;
+    // Serverbound Configuration (Client → Server)
+    public const SB_CONFIG_CLIENT_INFORMATION = 0x00;
+    public const SB_CONFIG_PLUGIN_MESSAGE = 0x01;
+    public const SB_CONFIG_ACKNOWLEDGE_FINISH_CONFIGURATION = 0x02;
+    public const SB_CONFIG_KEEP_ALIVE = 0x03;
+    public const SB_CONFIG_PONG = 0x04;
+    public const SB_CONFIG_RESOURCE_PACK = 0x05;
+    public const SB_CONFIG_KNOWN_PACKS = 0x06;
 
-    // --- Алиасы S→C Play (используются в коде сервера, те же значения) ---
-    public const PLAY_DIFFICULTY = self::PLAY_SERVER_DIFFICULTY;      // 0x36
-    public const PLAY_UPDATE_TIME = self::PLAY_TIME_UPDATE;           // 0x5A
-    public const PLAY_SPAWN_POSITION = self::PLAY_SET_DEFAULT_SPAWN_POSITION; // 0x49
-    public const PLAY_POSITION = self::PLAY_PLAYER_POSITION;          // 0x2C
-    public const PLAY_ABILITIES = self::PLAY_PLAYER_ABILITIES;        // 0x2E
-    public const PLAY_HELD_ITEM_SLOT = self::PLAY_HELD_ITEM_CHANGE;   // 0x48
-    public const PLAY_UPDATE_HEALTH = self::PLAY_SET_HEALTH;          // 0x30
-    public const PLAY_EXPERIENCE = self::PLAY_SET_XP;                 // 0x11
-    public const PLAY_HURT_ANIMATION = self::PLAY_HURT_ARMOR;         // 0x32
-    public const PLAY_SYSTEM_CHAT = self::PLAY_SYSTEM_CHAT_MESSAGE;   // 0x23
-    public const PLAY_MAP_CHUNK = self::PLAY_CHUNK_DATA;              // 0x21
+    // =========================================================================
+    // Play State — Clientbound (Server → Client), Protocol 763
+    // =========================================================================
+    public const CB_PLAY_BUNDLE_DELIMITER = 0x00;
+    public const CB_PLAY_ADD_ENTITY = 0x01;
+    public const CB_PLAY_ADD_EXPERIENCE_ORB = 0x02;
+    public const CB_PLAY_ADD_PLAYER = 0x03;
+    public const CB_PLAY_ANIMATE = 0x04;
+    public const CB_PLAY_AWARD_STATISTICS = 0x05;
+    public const CB_PLAY_BLOCK_CHANGED_ACK = 0x06;
+    public const CB_PLAY_BLOCK_DESTRUCTION = 0x07;
+    public const CB_PLAY_BLOCK_ENTITY_DATA = 0x08;
+    public const CB_PLAY_BLOCK_EVENT = 0x09;
+    public const CB_PLAY_BLOCK_UPDATE = 0x0A;
+    public const CB_PLAY_BOSS_EVENT = 0x0B;
+    public const CB_PLAY_CHANGE_DIFFICULTY = 0x0C;
+    public const CB_PLAY_CHUNK_BATCH_FINISHED = 0x0D;
+    public const CB_PLAY_CHUNK_BATCH_START = 0x0E;
+    public const CB_PLAY_CHUNK_BIOMES = 0x0F;
+    public const CB_PLAY_CLEAR_TITLES = 0x10;
+    public const CB_PLAY_COMMAND_SUGGESTIONS = 0x11;
+    public const CB_PLAY_COMMANDS = 0x12;
+    public const CB_PLAY_CONTAINER_CLOSE = 0x13;
+    public const CB_PLAY_CONTAINER_SET_CONTENT = 0x14;
+    public const CB_PLAY_CONTAINER_SET_DATA = 0x15;
+    public const CB_PLAY_CONTAINER_SET_SLOT = 0x16;
+    public const CB_PLAY_COOLDOWN = 0x17;
+    public const CB_PLAY_CUSTOM_CHAT_COMPLETIONS = 0x18;
+    public const CB_PLAY_CUSTOM_PAYLOAD = 0x19;
+    public const CB_PLAY_DAMAGE_EVENT = 0x1A;
+    public const CB_PLAY_DELETE_CHAT = 0x1B;
+    public const CB_PLAY_DISCONNECT = 0x1C;
+    public const CB_PLAY_DISGUISED_CHAT = 0x1D;
+    public const CB_PLAY_ENTITY_EVENT = 0x1E;
+    public const CB_PLAY_EXPLOSION = 0x1F;
+    public const CB_PLAY_FORGET_LEVEL_CHUNK = 0x20;
+    public const CB_PLAY_GAME_EVENT = 0x21;
+    public const CB_PLAY_KEEP_ALIVE = 0x22;
+    public const CB_PLAY_LEVEL_CHUNK_WITH_LIGHT = 0x23;
+    public const CB_PLAY_LEVEL_EVENT = 0x24;
+    public const CB_PLAY_LEVEL_PARTICLES = 0x25;
+    public const CB_PLAY_LIGHT_UPDATE = 0x26;
+    public const CB_PLAY_LOGIN = 0x27;
+    public const CB_PLAY_MAP_ITEM_DATA = 0x28;
+    public const CB_PLAY_MOVE_ENTITY_POS = 0x29;
+    public const CB_PLAY_MOVE_ENTITY_POS_ROT = 0x2A;
+    public const CB_PLAY_MOVE_ENTITY_ROT = 0x2B;
+    public const CB_PLAY_MOVE_VEHICLE = 0x2C;
+    public const CB_PLAY_OPEN_BOOK = 0x2D;
+    public const CB_PLAY_OPEN_SCREEN = 0x2E;
+    public const CB_PLAY_OPEN_SIGN_EDITOR = 0x2F;
+    public const CB_PLAY_PING = 0x30;
+    public const CB_PLAY_PLACE_GHOST_RECIPE = 0x31;
+    public const CB_PLAY_PLAYER_ABILITIES = 0x32;
+    public const CB_PLAY_PLAYER_CHAT = 0x33;
+    public const CB_PLAY_PLAYER_COMBAT_END = 0x34;
+    public const CB_PLAY_PLAYER_COMBAT_ENTER = 0x35;
+    public const CB_PLAY_PLAYER_COMBAT_KILL = 0x36;
+    public const CB_PLAY_PLAYER_INFO_REMOVE = 0x37;
+    public const CB_PLAY_PLAYER_INFO_UPDATE = 0x38;
+    public const CB_PLAY_PLAYER_LOOK_AT = 0x39;
+    public const CB_PLAY_PLAYER_POSITION = 0x3A;
+    public const CB_PLAY_RECIPE_BOOK_ADD = 0x3B;
+    public const CB_PLAY_RECIPE_BOOK_REMOVE = 0x3C;
+    public const CB_PLAY_RECIPE_BOOK_SETTINGS = 0x3D;
+    public const CB_PLAY_REMOVE_ENTITIES = 0x3E;
+    public const CB_PLAY_REMOVE_ENTITY_EFFECT = 0x3F;
+    public const CB_PLAY_RESOURCE_PACK = 0x40;
+    public const CB_PLAY_RESPAWN = 0x41;
+    public const CB_PLAY_ROTATE_HEAD = 0x42;
+    public const CB_PLAY_SECTION_BLOCKS_UPDATE = 0x43;
+    public const CB_PLAY_SELECT_ADVANCEMENTS_TAB = 0x44;
+    public const CB_PLAY_SERVER_DATA = 0x45;
+    public const CB_PLAY_SET_ACTION_BAR_TEXT = 0x46;
+    public const CB_PLAY_SET_BORDER_CENTER = 0x47;
+    public const CB_PLAY_SET_BORDER_LERP_SIZE = 0x48;
+    public const CB_PLAY_SET_BORDER_SIZE = 0x49;
+    public const CB_PLAY_SET_BORDER_WARNING_DELAY = 0x4A;
+    public const CB_PLAY_SET_BORDER_WARNING_DISTANCE = 0x4B;
+    public const CB_PLAY_SET_CAMERA = 0x4C;
+    public const CB_PLAY_SET_CARRIED_ITEM = 0x4D;
+    public const CB_PLAY_SET_CHUNK_CACHE_CENTER = 0x4E;
+    public const CB_PLAY_SET_CHUNK_CACHE_RADIUS = 0x4F;
+    public const CB_PLAY_SET_DEFAULT_SPAWN_POSITION = 0x50;
+    public const CB_PLAY_SET_DISPLAY_OBJECTIVE = 0x51;
+    public const CB_PLAY_SET_ENTITY_DATA = 0x52;
+    public const CB_PLAY_SET_ENTITY_LINK = 0x53;
+    public const CB_PLAY_SET_ENTITY_MOTION = 0x54;
+    public const CB_PLAY_SET_EQUIPMENT = 0x55;
+    public const CB_PLAY_SET_EXPERIENCE = 0x56;
+    public const CB_PLAY_SET_HEALTH = 0x57;
+    public const CB_PLAY_SET_OBJECTIVE = 0x58;
+    public const CB_PLAY_SET_PASSENGERS = 0x59;
+    public const CB_PLAY_SET_PLAYER_TEAM = 0x5A;
+    public const CB_PLAY_SET_SCORE = 0x5B;
+    public const CB_PLAY_SET_SIMULATION_DISTANCE = 0x5C;
+    public const CB_PLAY_SET_SUBTITLE_TEXT = 0x5D;
+    public const CB_PLAY_SET_TIME = 0x5E;
+    public const CB_PLAY_SET_TITLE_TEXT = 0x5F;
+    public const CB_PLAY_SET_TITLES_ANIMATION = 0x60;
+    public const CB_PLAY_SOUND_ENTITY = 0x61;
+    public const CB_PLAY_SOUND = 0x62;
+    public const CB_PLAY_STOP_SOUND = 0x63;
+    public const CB_PLAY_STORE_COOKIE = 0x64;
+    public const CB_PLAY_SYSTEM_CHAT = 0x65;
+    public const CB_PLAY_TAB_LIST = 0x66;
+    public const CB_PLAY_TAG_QUERY = 0x67;
+    public const CB_PLAY_TELEPORT_ENTITY = 0x68;
+    public const CB_PLAY_TRANSFER = 0x69;
+    public const CB_PLAY_UPDATE_ADVANCEMENTS = 0x6A;
+    public const CB_PLAY_UPDATE_ATTRIBUTES = 0x6B;
+    public const CB_PLAY_UPDATE_ENABLED_FEATURES = 0x6C;
+    public const CB_PLAY_UPDATE_ENTITY_POSITION = 0x6D;
+    public const CB_PLAY_UPDATE_MOB_EFFECT = 0x6E;
+    public const CB_PLAY_UPDATE_RECIPES = 0x6F;
+    public const CB_PLAY_UPDATE_TAGS = 0x70;
+
+    // =========================================================================
+    // Play State — Serverbound (Client → Server), Protocol 763
+    // =========================================================================
+    public const SB_PLAY_ACCEPT_TELEPORTATION = 0x00;
+    public const SB_PLAY_BLOCK_ENTITY_TAG_QUERY = 0x01;
+    public const SB_PLAY_CHANGE_BOOK_PAGE = 0x02;
+    public const SB_PLAY_CHAT_ACK = 0x03;
+    public const SB_PLAY_CHAT_COMMAND = 0x04;
+    public const SB_PLAY_CHAT_COMMAND_SIGNED = 0x05;
+    public const SB_PLAY_CHAT = 0x06;
+    public const SB_PLAY_CHAT_SESSION_UPDATE = 0x07;
+    public const SB_PLAY_CHUNK_BATCH_RECEIVED = 0x08;
+    public const SB_PLAY_CLIENT_COMMAND = 0x09;
+    public const SB_PLAY_CLIENT_INFORMATION = 0x0A;
+    public const SB_PLAY_COMMAND_SUGGESTIONS = 0x0B;
+    public const SB_PLAY_CONTAINER_CLOSE = 0x0C;
+    public const SB_PLAY_CONTAINER_CLICK = 0x0D;
+    public const SB_PLAY_CONTAINER_BUTTON_CLICK = 0x0E;
+    public const SB_PLAY_SET_CREATIVE_MODE_SLOT = 0x0F;
+    public const SB_PLAY_CUSTOM_PAYLOAD = 0x10;
+    public const SB_PLAY_EDIT_BOOK = 0x11;
+    public const SB_PLAY_ENTITY_TAG_QUERY = 0x12;
+    public const SB_PLAY_INTERACT = 0x13;
+    public const SB_PLAY_JIGSAW_GENERATE = 0x14;
+    public const SB_PLAY_KEEP_ALIVE = 0x15;
+    public const SB_PLAY_LOCK_DIFFICULTY = 0x16;
+    public const SB_PLAY_MOVE_PLAYER_POS = 0x17;
+    public const SB_PLAY_MOVE_PLAYER_POS_ROT = 0x18;
+    public const SB_PLAY_MOVE_PLAYER_ROT = 0x19;
+    public const SB_PLAY_MOVE_PLAYER_STATUS_ONLY = 0x1A;
+    public const SB_PLAY_MOVE_VEHICLE = 0x1B;
+    public const SB_PLAY_PADDLE_BOAT = 0x1C;
+    public const SB_PLAY_PICK_ITEM = 0x1D;
+    public const SB_PLAY_PLACE_RECIPE = 0x1E;
+    public const SB_PLAY_PLAYER_ABILITIES = 0x1F;
+    public const SB_PLAY_PLAYER_ACTION = 0x20;
+    public const SB_PLAY_PLAYER_COMMAND = 0x21;
+    public const SB_PLAY_PLAYER_INPUT = 0x22;
+    public const SB_PLAY_PONG = 0x23;
+    public const SB_PLAY_RECIPE_BOOK_CHANGE_SETTINGS = 0x24;
+    public const SB_PLAY_RECIPE_BOOK_SEEN_RECIPE = 0x25;
+    public const SB_PLAY_RENAME_ITEM = 0x26;
+    public const SB_PLAY_RESOURCE_PACK = 0x27;
+    public const SB_PLAY_SEEN_ADVANCEMENTS = 0x28;
+    public const SB_PLAY_SELECT_TRADE = 0x29;
+    public const SB_PLAY_SET_BEACON = 0x2A;
+    public const SB_PLAY_SET_CARRIED_ITEM = 0x2B;
+    public const SB_PLAY_SET_COMMAND_BLOCK = 0x2C;
+    public const SB_PLAY_SET_COMMAND_MINECART = 0x2D;
+    public const SB_PLAY_SET_HELD_ITEM = 0x2E;
+    public const SB_PLAY_SET_JIGSAW_BLOCK = 0x2F;
+    public const SB_PLAY_SET_STRUCTURE_BLOCK = 0x30;
+    public const SB_PLAY_SIGN_UPDATE = 0x31;
+    public const SB_PLAY_SWING = 0x32;
+    public const SB_PLAY_TELEPORT_TO_ENTITY = 0x33;
+    public const SB_PLAY_USE_ITEM_ON = 0x34;
+    public const SB_PLAY_USE_ITEM = 0x35;
+
+    // =========================================================================
+    // Обратная совместимость: старые имена (CS_* / PLAY_* / CONFIG_* / LOGIN_*)
+    // сохраняются как алиасы канонических констант Protocol 763, чтобы весь
+    // существующий код server.php продолжал работать без изменений вызовов.
+    // ЗНАЧЕНИЯ исправлены на точные ID из Protocol 763!
+    // =========================================================================
+
+    // --- Старые Server-bound (C→S) алиасы → SB_* ---
+    public const CS_LOGIN_START = self::SB_LOGIN_START;                         // 0x00
+    public const CS_LOGIN_ACKNOWLEDGED = self::SB_LOGIN_LOGIN_ACKNOWLEDGED;     // 0x03
+
+    public const CS_CONFIG_PLUGIN_MESSAGE = self::SB_CONFIG_PLUGIN_MESSAGE;                     // 0x01
+    public const CS_CONFIG_FINISHED_ACK = self::SB_CONFIG_ACKNOWLEDGE_FINISH_CONFIGURATION;     // 0x02
+    public const CS_CONFIG_KEEP_ALIVE = self::SB_CONFIG_KEEP_ALIVE;                             // 0x03
+    public const CS_CONFIG_PONG = self::SB_CONFIG_PONG;                                         // 0x04
+    public const CS_CONFIG_RESOURCE_PACK_STATUS = self::SB_CONFIG_RESOURCE_PACK;                // 0x05
+    public const CS_CONFIG_KNOWN_PACKS = self::SB_CONFIG_KNOWN_PACKS;                            // 0x06
+    public const CS_CONFIG_SELECT_KNOWN_PACKS = self::SB_CONFIG_KNOWN_PACKS;                     // 0x06
+    public const CS_CONFIG_CLIENT_INFORMATION = self::SB_CONFIG_CLIENT_INFORMATION;              // 0x00
+    public const CS_CONFIG_GENERATE_STRUCTURE = 0x07; // вне таблицы 763 (удалён) — заглушка
+    public const CS_CONFIG_DELETE_STRUCTURE = 0x08;  // вне таблицы 763 (удалён) — заглушка
+    public const CS_CONFIG_MODERN_BRAND = 0x09;    // вне таблицы 763 (удалён) — заглушка
+
+    public const CS_PLAY_CONFIRM_TELEPORT = self::SB_PLAY_ACCEPT_TELEPORTATION;  // 0x00
+    public const CS_PLAY_TELEPORT_CONFIRM = self::SB_PLAY_ACCEPT_TELEPORTATION;  // 0x00 (алиас)
+    public const CS_PLAY_CLIENT_TICK = self::SB_PLAY_CHAT_ACK;                   // 0x03
+    public const CS_PLAY_CHAT_COMMAND = self::SB_PLAY_CHAT_COMMAND;              // 0x04
+    public const CS_PLAY_POSITION = self::SB_PLAY_MOVE_PLAYER_POS;               // 0x17
+    public const CS_PLAY_POSITION_LOOK = self::SB_PLAY_MOVE_PLAYER_POS_ROT;      // 0x18
+    public const CS_PLAY_LOOK = self::SB_PLAY_MOVE_PLAYER_ROT;                   // 0x19
+    public const CS_PLAY_FLYING = self::SB_PLAY_MOVE_PLAYER_STATUS_ONLY;         // 0x1A
+    public const CS_PLAY_SETTINGS = self::SB_PLAY_CLIENT_INFORMATION;            // 0x0A
+    public const CS_PLAY_WORLD_INTERACTION = self::SB_PLAY_USE_ITEM_ON;          // 0x34
+    public const CS_PLAY_SWING_ARM = self::SB_PLAY_SWING;                        // 0x32
+    public const CS_PLAY_KEEP_ALIVE = self::SB_PLAY_KEEP_ALIVE;                  // 0x15
+    public const CS_PLAY_PONG = self::SB_PLAY_PONG;                              // 0x23
+    public const CS_PLAY_CUSTOM_PAYLOAD = self::SB_PLAY_CUSTOM_PAYLOAD;          // 0x10
+
+    // --- Старые Client-bound (S→C) алиасы → CB_* (значения исправлены!) ---
+    public const LOGIN_SUCCESS = self::CB_LOGIN_SUCCESS;                         // 0x02
+
+    public const CONFIG_KEEP_ALIVE = self::CB_CONFIG_KEEP_ALIVE;                 // 0x03
+    public const CONFIG_PING = self::CB_CONFIG_PING;                             // 0x04
+    public const CONFIG_PLUGIN_MESSAGE = self::CB_CONFIG_PLUGIN_MESSAGE;         // 0x00
+    public const CONFIG_DISCONNECT = self::CB_CONFIG_DISCONNECT;                 // 0x01
+    public const CONFIG_FINISH_CONFIGURATION = self::CB_CONFIG_FINISH_CONFIGURATION; // 0x02
+    public const CONFIG_RESOURCE_PACK = self::CB_CONFIG_ADD_RESOURCE_PACK;       // 0x08
+    public const CONFIG_TRANSFER_HANDLER = self::CB_CONFIG_TRANSFER;             // 0x0A
+    public const CONFIG_FEATURE_FLAGS = self::CB_CONFIG_UPDATE_ENABLED_FEATURES; // 0x0B
+    public const CONFIG_REGISTRY_DATA = self::CB_CONFIG_REGISTRY_DATA;           // 0x06
+    public const CONFIG_REMOVE_RESOURCE_PACK = self::CB_CONFIG_REMOVE_RESOURCE_PACK; // 0x07
+    public const CONFIG_UPDATE_TAGS = self::CB_CONFIG_UPDATE_TAGS;               // 0x0C
+    public const CONFIG_KNOWN_PACKS = self::CB_CONFIG_KNOWN_PACKS;               // 0x0D
+
+    public const PLAY_SPAWN_ENTITY = self::CB_PLAY_ADD_ENTITY;                   // 0x01
+    public const PLAY_DECLARE_COMMANDS = self::CB_PLAY_COMMANDS;                 // 0x12
+    public const PLAY_MULTI_BLOCK_CHANGE = self::CB_PLAY_SECTION_BLOCKS_UPDATE;  // 0x43
+    public const PLAY_GAME_EVENT = self::CB_PLAY_GAME_EVENT;                     // 0x21
+    public const PLAY_EMPTY_CHUNK_SNAPSHOT = self::CB_PLAY_CHUNK_BATCH_FINISHED; // 0x0D
+    public const PLAY_SET_XP = self::CB_PLAY_SET_EXPERIENCE;                     // 0x56
+    public const PLAY_INITIALIZE_WINDOW = self::CB_PLAY_CONTAINER_SET_CONTENT;   // 0x14
+    public const PLAY_KEEP_ALIVE = self::CB_PLAY_KEEP_ALIVE;                     // 0x22
+    public const PLAY_WORLD_EVENTS = self::CB_PLAY_LEVEL_EVENT;                  // 0x24
+    public const PLAY_SECTION_BLOCKS_UPDATE = self::CB_PLAY_SECTION_BLOCKS_UPDATE; // 0x43
+    public const PLAY_SYSTEM_CHAT_MESSAGE = self::CB_PLAY_SYSTEM_CHAT;           // 0x65
+    public const PLAY_PLAYER_INFO = self::CB_PLAY_PLAYER_INFO_UPDATE;            // 0x38
+    public const PLAY_LIMITED_PACKET_SIZE = self::CB_PLAY_SERVER_DATA;           // 0x45
+    public const PLAY_SET_TITLE_TEXT = self::CB_PLAY_SET_TITLE_TEXT;             // 0x5F
+    public const PLAY_ADD_PLAYER = self::CB_PLAY_ADD_PLAYER;                     // 0x03
+    public const PLAY_JOIN_GAME = self::CB_PLAY_LOGIN;                           // 0x27
+    public const PLAY_PLAYER_POSITION = self::CB_PLAY_PLAYER_POSITION;           // 0x3A
+    public const PLAY_PLAYER_ABILITIES = self::CB_PLAY_PLAYER_ABILITIES;         // 0x32
+    public const PLAY_PLAYER_COMPOSITION = self::CB_PLAY_SET_EQUIPMENT;          // 0x55
+    public const PLAY_SET_HEALTH = self::CB_PLAY_SET_HEALTH;                     // 0x57
+    public const PLAY_SET_PASSIVES = self::CB_PLAY_SET_ENTITY_MOTION;            // 0x54
+    public const PLAY_HURT_ARMOR = self::CB_PLAY_DAMAGE_EVENT;                   // 0x1A
+    public const PLAY_SERVER_DIFFICULTY = self::CB_PLAY_CHANGE_DIFFICULTY;       // 0x0C
+    public const PLAY_SIMULATION_DISTANCE = self::CB_PLAY_SET_SIMULATION_DISTANCE; // 0x5C
+    public const PLAY_POSITION_SYNC = self::CB_PLAY_MOVE_ENTITY_POS;             // 0x29
+    public const PLAY_SET_SLOT = self::CB_PLAY_CONTAINER_SET_SLOT;               // 0x16
+    public const PLAY_ACTIONBAR_TEXT = self::CB_PLAY_SET_ACTION_BAR_TEXT;        // 0x46
+    public const PLAY_SET_DEFAULT_SPAWN_POSITION = self::CB_PLAY_SET_DEFAULT_SPAWN_POSITION; // 0x50
+    public const PLAY_MAP_ID = self::CB_PLAY_MAP_ITEM_DATA;                      // 0x28
+    public const PLAY_REQUEST_PERMISSIONS = self::CB_PLAY_SET_CAMERA;            // 0x4C
+    public const PLAY_TITLE_SUBTITLE = self::CB_PLAY_SET_SUBTITLE_TEXT;          // 0x5D
+    public const PLAY_TIME_UPDATE = self::CB_PLAY_SET_TIME;                      // 0x5E
+    public const PLAY_SET_CRAFT_RESULT = self::CB_PLAY_PLACE_GHOST_RECIPE;       // 0x31
+    public const PLAY_PLUGIN_MESSAGE = self::CB_PLAY_CUSTOM_PAYLOAD;             // 0x19
+    public const PLAY_ACKNOWLEDGE_CHUNKS = self::CB_PLAY_BLOCK_CHANGED_ACK;      // 0x06
+    public const PLAY_CHUNK_DATA = self::CB_PLAY_LEVEL_CHUNK_WITH_LIGHT;          // 0x23
+    public const PLAY_UNLOAD_CHUNK = self::CB_PLAY_FORGET_LEVEL_CHUNK;            // 0x20
+    public const PLAY_BLOCK_UPDATE = self::CB_PLAY_BLOCK_UPDATE;                  // 0x0A
+    public const PLAY_HELD_ITEM_CHANGE = self::CB_PLAY_SET_CARRIED_ITEM;          // 0x4D
+    public const PLAY_CLOSE_CONTAINER = self::CB_PLAY_CONTAINER_CLOSE;            // 0x13
+    public const PLAY_OPEN_SCREEN = self::CB_PLAY_OPEN_SCREEN;                    // 0x2E
+    public const PLAY_CONTAINER_PROPERTY = self::CB_PLAY_CONTAINER_SET_DATA;      // 0x15
+    public const PLAY_DELETE_ENTITY = self::CB_PLAY_REMOVE_ENTITIES;              // 0x3E
+    public const PLAY_CHANGE_GAME_MODE = self::CB_PLAY_PLAYER_INFO_UPDATE;        // 0x38 (нет отдельного пакета в 763)
+    public const PLAY_SET_COOLDOWN = self::CB_PLAY_COOLDOWN;                      // 0x17
+    public const PLAY_CUSTOM_PAYLOAD = self::CB_PLAY_CUSTOM_PAYLOAD;              // 0x19
+    public const PLAY_STOP_SOUND = self::CB_PLAY_STOP_SOUND;                      // 0x63
+    public const PLAY_CLEAR_TITLES = self::CB_PLAY_CLEAR_TITLES;                  // 0x10
+    public const PLAY_REMOVE_RESOURCE_PACK = self::CB_PLAY_RESOURCE_PACK;         // 0x40
+
+    public const PLAY_DIFFICULTY = self::PLAY_SERVER_DIFFICULTY;                 // 0x0C
+    public const PLAY_UPDATE_TIME = self::PLAY_TIME_UPDATE;                      // 0x5E
+    public const PLAY_SPAWN_POSITION = self::PLAY_SET_DEFAULT_SPAWN_POSITION;    // 0x50
+    public const PLAY_POSITION = self::PLAY_PLAYER_POSITION;                     // 0x3A
+    public const PLAY_ABILITIES = self::PLAY_PLAYER_ABILITIES;                   // 0x32
+    public const PLAY_HELD_ITEM_SLOT = self::PLAY_HELD_ITEM_CHANGE;              // 0x4D
+    public const PLAY_UPDATE_HEALTH = self::PLAY_SET_HEALTH;                     // 0x57
+    public const PLAY_EXPERIENCE = self::PLAY_SET_XP;                            // 0x56
+    public const PLAY_HURT_ANIMATION = self::PLAY_HURT_ARMOR;                    // 0x1A
+    public const PLAY_SYSTEM_CHAT = self::PLAY_SYSTEM_CHAT_MESSAGE;              // 0x65
+    public const PLAY_MAP_CHUNK = self::PLAY_CHUNK_DATA;                         // 0x23
 
     private function __construct()
     {
@@ -250,34 +492,51 @@ final class PacketLogger
 
     public static function getPacketName(int $packetId): string
     {
+        // Human-readable имена для часто используемых ID Protocol 763.
+        // Таблица справочная (для логов), направление уточняется состоянием.
         $names = [
-            0x00 => 'Handshake/Status Ping',
-            0x01 => 'Status/Ping Request',
-            0x02 => 'Login Success / Plugin Message',
-            0x03 => 'Login Acknowledged / Finish Configuration',
-            0x04 => 'Config Keep Alive',
-            0x05 => 'Play: Acknowledge Teleport',
-            0x07 => 'Registry Data',
-            0x0C => 'Feature Flags',
-            0x0D => 'Update Tags / Remove Resource Pack',
-            0x17 => 'Play: Plugin Message',
-            0x1E => 'Set Death Location',
-            0x1F => 'System Chat Message',
-            0x20 => 'Play: Ping',
-            0x21 => 'Keep Alive',
-            0x26 => 'Join Game',
-            0x2D => 'Player Info',
-            0x2E => 'Search Creative Tab Contents',
-            0x33 => 'Server Difficulty',
-            0x34 => 'Empty Chunk Snapshot',
-            0x38 => 'Player Position and Look',
-            0x3F => 'Set Health',
-            0x40 => 'Hurt Armor',
-            0x42 => 'Play Effect (by int)',
-            0x45 => 'Player Abilities',
-            0x48 => 'Player Composition',
-            0x4E => 'Set Default Spawn Position',
-            0x5B => 'Time Update',
+            // Handshake / Status
+            0x00 => 'Handshake / Status Request / SB Login Start / CB Status Response',
+            0x01 => 'Status Ping / CB Login Encryption Request / SB Login Encryption Response',
+            0x02 => 'CB Login Success / SB Login Plugin Response',
+            0x03 => 'CB Login Set Compression / SB Login Acknowledged',
+            0x04 => 'CB Login Plugin Request',
+
+            // Configuration (S→C)
+            0x05 => 'SB Play: Chat (Signed)',
+
+            // Serverbound Play (C→S)
+            0x06 => 'SB Play: Chat',
+            0x0A => 'SB Play: Client Information (Settings)',
+            0x10 => 'SB Play: Custom Payload (Plugin Message)',
+            0x15 => 'SB Play: Keep Alive',
+            0x17 => 'SB Play: Move Player Pos',
+            0x18 => 'SB Play: Move Player Pos Rot',
+            0x19 => 'SB Play: Move Player Rot',
+            0x1A => 'SB Play: Move Player Status Only',
+            0x23 => 'SB Play: Pong',
+
+            // Clientbound Play (S→C)
+            0x0D => 'CB Play: Chunk Batch Finished (Empty Snapshot)',
+            0x12 => 'CB Play: Commands (Declare Commands)',
+            0x19 => 'CB Play: Custom Payload (Plugin Message)',
+            0x1A => 'CB Play: Damage Event (Hurt Animation)',
+            0x21 => 'CB Play: Game Event',
+            0x22 => 'CB Play: Keep Alive',
+            0x23 => 'CB Play: Level Chunk With Light (Chunk Data)',
+            0x27 => 'CB Play: Login (Join Game)',
+            0x32 => 'CB Play: Player Abilities',
+            0x37 => 'CB Play: Player Info Remove',
+            0x38 => 'CB Play: Player Info Update (Add)',
+            0x3A => 'CB Play: Player Position (Teleport)',
+            0x4D => 'CB Play: Set Carried Item (Held Item Change)',
+            0x50 => 'CB Play: Set Default Spawn Position',
+            0x56 => 'CB Play: Set Experience',
+            0x57 => 'CB Play: Set Health',
+            0x5C => 'CB Play: Set Simulation Distance',
+            0x5E => 'CB Play: Set Time (Time Update)',
+            0x65 => 'CB Play: System Chat',
+            0x0C => 'CB Play: Change Difficulty (Server Difficulty)',
         ];
 
         return $names[$packetId] ?? 'Unknown';
@@ -1427,7 +1686,7 @@ final class LoginHandler implements PacketHandler
         $offset = 0;
         $packetId = VarInt::read($packetData, $offset);
 
-        if ($packetId !== PacketId::CS_LOGIN_START) {
+        if ($packetId !== PacketId::SB_LOGIN_START) {
             return;
         }
 
@@ -1494,12 +1753,12 @@ final class PlayHandler implements PacketHandler
         $packetId = VarInt::read($packetData, $offset);
 
         switch ($packetId) {
-            case PacketId::CS_LOGIN_ACKNOWLEDGED:
+            case PacketId::SB_LOGIN_LOGIN_ACKNOWLEDGED:
                 // 0x03 в контексте Play — это тоже ACK (клиент подтверждает
                 // переход); игнорируем повторно.
                 return;
 
-            case PacketId::CS_PLAY_TELEPORT_CONFIRM:
+            case PacketId::SB_PLAY_ACCEPT_TELEPORTATION:
                 $confirmId = VarInt::read($packetData, $offset);
                 PacketLogger::logInfo("Teleport Confirm от клиента {$connection->id}: id=$confirmId");
                 $connection->pendingKeepAliveId = null;
@@ -1507,29 +1766,29 @@ final class PlayHandler implements PacketHandler
                 $this->server->sendChunksIfNeeded($connection);
                 return;
 
-            case PacketId::CS_PLAY_KEEP_ALIVE:
+            case PacketId::SB_PLAY_KEEP_ALIVE:
                 $keepAliveId = unpack('J', substr($packetData, $offset, 8))[1] ?? 0;
                 PacketLogger::logInfo("Keep Alive получен от клиента {$connection->id}: $keepAliveId");
                 $connection->pendingKeepAliveId = null;
                 return;
 
-            case PacketId::CS_PLAY_POSITION:
-            case PacketId::CS_PLAY_POSITION_LOOK:
-            case PacketId::CS_PLAY_LOOK:
-            case PacketId::CS_PLAY_FLYING:
+            case PacketId::SB_PLAY_MOVE_PLAYER_POS:
+            case PacketId::SB_PLAY_MOVE_PLAYER_POS_ROT:
+            case PacketId::SB_PLAY_MOVE_PLAYER_ROT:
+            case PacketId::SB_PLAY_MOVE_PLAYER_STATUS_ONLY:
                 // Движение игрока — минимальный сервер принимает молча.
                 return;
 
-            case PacketId::CS_PLAY_SETTINGS:
+            case PacketId::SB_PLAY_CLIENT_INFORMATION:
                 // Client Settings — можно проигнорировать.
                 return;
 
-            case PacketId::CS_PLAY_CUSTOM_PAYLOAD:
+            case PacketId::SB_PLAY_CUSTOM_PAYLOAD:
                 $channel = StringHandler::read($packetData, $offset);
                 PacketLogger::logInfo("Plugin message от клиента {$connection->id}: $channel");
                 return;
 
-            case PacketId::CS_PLAY_PONG:
+            case PacketId::SB_PLAY_PONG:
                 return;
 
             default:
@@ -1672,6 +1931,51 @@ final class MinecraftServer
                 $failures[] = $name;
             }
         };
+
+        // --- Валидация констант PacketId (Protocol 763) ---
+        PacketLogger::logInfo('🧪 Running PacketId validation...');
+
+        $requiredConstants = [
+            'CB_LOGIN_SUCCESS' => 0x02,
+            'SB_LOGIN_START' => 0x00,
+            'SB_LOGIN_LOGIN_ACKNOWLEDGED' => 0x03,
+            'CB_CONFIG_KNOWN_PACKS' => 0x0D,
+            'SB_CONFIG_KNOWN_PACKS' => 0x06,
+            'CB_CONFIG_FINISH_CONFIGURATION' => 0x02,
+            'SB_CONFIG_ACKNOWLEDGE_FINISH_CONFIGURATION' => 0x02,
+            'CB_PLAY_LOGIN' => 0x27,
+            'CB_PLAY_PLAYER_POSITION' => 0x3A,
+            'CB_PLAY_KEEP_ALIVE' => 0x22,
+            'CB_PLAY_LEVEL_CHUNK_WITH_LIGHT' => 0x23,
+            'CB_PLAY_SYSTEM_CHAT' => 0x65,
+            'SB_PLAY_ACCEPT_TELEPORTATION' => 0x00,
+            'SB_PLAY_KEEP_ALIVE' => 0x15,
+            'SB_PLAY_MOVE_PLAYER_POS' => 0x17,
+            'SB_PLAY_MOVE_PLAYER_POS_ROT' => 0x18,
+            'SB_PLAY_MOVE_PLAYER_ROT' => 0x19,
+        ];
+
+        foreach ($requiredConstants as $const => $expectedValue) {
+            $fullConst = "PacketId::{$const}";
+            if (!defined($fullConst)) {
+                PacketLogger::logError("❌ Constant {$fullConst} not defined!");
+                throw new \RuntimeException("Missing PacketId constant: {$const}");
+            }
+            $actual = constant($fullConst);
+            if ($actual !== $expectedValue) {
+                PacketLogger::logError(sprintf(
+                    '❌ PacketId::%s = 0x%02X, ожидалось 0x%02X (Protocol 763)',
+                    $const,
+                    $actual,
+                    $expectedValue
+                ));
+                $failures[] = "PacketId::{$const} value mismatch";
+                continue;
+            }
+            PacketLogger::logInfo("  ✅ {$const} = 0x" . dechex($actual));
+        }
+
+        PacketLogger::logInfo('✅ All required PacketId constants are defined!');
 
         // --- VarInt encoding ---
         $check(bin2hex(VarInt::write(0)) === '00', 'VarInt(0)');
@@ -1829,7 +2133,7 @@ final class MinecraftServer
         try {
             // Перехват Login Acknowledged (0x03) в состоянии Login:
             // единственный триггер перехода сразу в PLAY (без Configuration!).
-            if ($connection->state === ProtocolState::Login && $packetId === PacketId::CS_LOGIN_ACKNOWLEDGED) {
+            if ($connection->state === ProtocolState::Login && $packetId === PacketId::SB_LOGIN_LOGIN_ACKNOWLEDGED) {
                 $this->onLoginAcknowledged($connection);
 
                 return;
@@ -1876,7 +2180,7 @@ final class MinecraftServer
                 PacketId::PLAY_JOIN_GAME,
                 $this->packetFactory->createJoinGame($entityId)
             );
-            PacketLogger::logInfo("Join Game (0x28) отправлен клиенту $clientId");
+            PacketLogger::logInfo("Join Game (0x27) отправлен клиенту $clientId");
 
             $this->connectionManager->sendPacket(
                 $clientId,
@@ -1895,7 +2199,7 @@ final class MinecraftServer
                 PacketId::PLAY_PLAYER_INFO,
                 $this->packetFactory->createPlayerInfoAdd($connection->uuid, $connection->username)
             );
-            PacketLogger::logInfo("Player Info Add (0x3A) отправлен клиенту $clientId");
+            PacketLogger::logInfo("Player Info Add (0x38) отправлен клиенту $clientId");
 
             $this->connectionManager->sendPacket(
                 $clientId,
@@ -1920,7 +2224,7 @@ final class MinecraftServer
                 PacketId::PLAY_POSITION,
                 $this->packetFactory->createPlayerPosition($spawn['x'], $spawn['y'], $spawn['z'])
             );
-            PacketLogger::logInfo("Position (teleport, 0x3C) отправлен клиенту $clientId");
+            PacketLogger::logInfo("Position (teleport, 0x3A) отправлен клиенту $clientId");
 
             $this->connectionManager->sendPacket(
                 $clientId,
@@ -2036,10 +2340,10 @@ final class MinecraftServer
         $packetId = VarInt::read($packetData, $offset);
 
         switch ($packetId) {
-            case PacketId::CS_CONFIG_CLIENT_INFORMATION:
+            case PacketId::SB_CONFIG_CLIENT_INFORMATION:
                 return;
 
-            case PacketId::CS_CONFIG_KEEP_ALIVE:
+            case PacketId::SB_CONFIG_KEEP_ALIVE:
                 $this->connectionManager->sendPacket(
                     $connection->id,
                     PacketId::CONFIG_KEEP_ALIVE,
@@ -2047,7 +2351,7 @@ final class MinecraftServer
                 );
                 return;
 
-            case PacketId::CS_CONFIG_PONG: // C→S ответ на Config Ping (0x03) — эхо
+            case PacketId::SB_CONFIG_PONG: // C→S ответ на Config Ping (0x03) — эхо
                 $this->connectionManager->sendPacket(
                     $connection->id,
                     PacketId::CONFIG_PING,
@@ -2055,7 +2359,7 @@ final class MinecraftServer
                 );
                 return;
 
-            case PacketId::CS_CONFIG_PLUGIN_MESSAGE:
+            case PacketId::SB_CONFIG_PLUGIN_MESSAGE:
                 $this->connectionManager->sendPacket(
                     $connection->id,
                     PacketId::CONFIG_PLUGIN_MESSAGE,
@@ -2063,7 +2367,7 @@ final class MinecraftServer
                 );
                 return;
 
-            case PacketId::CS_CONFIG_FINISHED_ACK:
+            case PacketId::SB_CONFIG_ACKNOWLEDGE_FINISH_CONFIGURATION:
                 PacketLogger::logInfo("Клиент {$connection->id} подтвердил конфигурацию — вход в Play");
                 $connection->state = PacketState::Play;
                 $this->sendGamePackets($connection);
