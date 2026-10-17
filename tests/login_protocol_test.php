@@ -403,9 +403,7 @@ echo "\n== 6. Регрессия DecoderException (Packet 0/4) ==\n";
 $c11 = connOf($cm11);
 $c11->buffer = handshakePacket(763, 2) . loginStartPacket('turel1983') . loginAcknowledgedPacket();
 $s11->processBuffer($c11->id, $c11);
-$cm11->tickDelayedPackets();
 usleep(2_200_000); // прежний fallback срабатывал через 2 секунды
-$cm11->tickDelayedPackets();
 $full = parseFrames(drainSocket($cli11, 1.0));
 $allIds = array_map(static fn(array $p): int => $p[0], $full);
 check(!in_array(0x04, $allIds, true), 'Ни одного Login Plugin Request (CB 0x04) за весь flow — причина DecoderException устранена');
@@ -419,7 +417,6 @@ $c12 = connOf($cm12);
 $c12->buffer = handshakePacket(763, 2) . loginStartPacket('turel1983');
 $s12->processBuffer($c12->id, $c12);
 usleep(2_200_000);
-$cm12->tickDelayedPackets();
 $late = parseFrames(drainSocket($cli12, 0.5));
 $lateIds = array_map(static fn(array $p): int => $p[0], $late);
 check($lateIds === [0x02], 'Клиент без ACK → сервер молча ждёт (только Login Success, никаких пакетов через 2 сек)');

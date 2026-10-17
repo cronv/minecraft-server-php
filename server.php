@@ -1439,8 +1439,6 @@ final class ClientConnection
     public int $chunkQueueIndex = 0;
     /** @var int Протокол клиента из Handshake (763 = 1.20.1). */
     public int $protocol = 0;
-    /** Состояние Login Plugin Request fallback: none|scheduled|sent|answered. */
-    public string $pluginRequestState = 'none';
 
     /** @param resource $socket */
     public function __construct(
@@ -1456,70 +1454,20 @@ final class ConnectionManager
     /** @var array<int, ClientConnection> */
     private array $connections = [];
 
-    /** @var array<int, array{clientId:int, dueAt:float, packetId:int, data:string, label:string, guard:?callable}> */
-    private array $delayedPackets = [];
-
     public function __construct(private readonly MinecraftServer $server)
     {
     }
 
-    /**
-     * Планирует отправку пакета через $delay секунд (одноразово).
-     * $guard — опциональный callback(ClientConnection): bool; если возвращает
-     * false, пакет не отправляется (например, состояние уже сменилось).
-     */
-    public function scheduleDelayedPacket(
-        int $clientId,
-        float $delay,
-        int $packetId,
-        string $data,
-        string $label = '',
-        ?callable $guard = null,
-    ): void {
-        $this->delayedPackets[] = [
-            'clientId' => $clientId,
-            'dueAt' => microtime(true) + $delay,
-            'packetId' => $packetId,
-            'data' => $data,
-            'label' => $label,
-            'guard' => $guard,
-        ];
-        PacketLogger::logInfo("🕒 Отложенный пакет '$label' (0x" . dechex($packetId) . ") для клиента $clientId через {$delay}s");
-    }
-
-    /** Тик отложенных пакетов — вызывается из главного цикла сервера. */
-    public function tickDelayedPackets(): void
-    {
-        if ($this->delayedPackets === []) {
-            return;
-        }
-
-        $now = microtime(true);
-        foreach ($this->delayedPackets as $key => $job) {
-            if ($now < $job['dueAt']) {
-                continue;
-            }
-            unset($this->delayedPackets[$key]);
-
-            $connection = $this->connections[$job['clientId']] ?? null;
-            if ($connection === null) {
-                continue;
-            }
-            if ($job['guard'] !== null && !$job['guard']($connection)) {
-                PacketLogger::logInfo("🚫 Отменён отложенный пакет '{$job['label']}' для клиента {$job['clientId']} (условие не выполнено)");
-                if ($job['packetId'] === PacketId::CB_LOGIN_PLUGIN_REQUEST) {
-                    $connection->pluginRequestState = 'cancelled';
-                }
-                continue;
-            }
-
-            PacketLogger::logInfo("📨 Отправка отложенного пакета '{$job['label']}' клиенту {$job['clientId']}");
-            $this->sendPacket($job['clientId'], $job['packetId'], $job['data']);
-            if ($job['packetId'] === PacketId::CB_LOGIN_PLUGIN_REQUEST) {
-                $connection->pluginRequestState = 'sent';
-            }
-        }
-    }
+    // ВАЖНО (устранение DecoderException «Packet 0/4 ... found 36 bytes extra»):
+    // ранее здесь существовал механизм «отложенных пакетов»
+    // (scheduleDelayedPacket/tickDelayedPackets), который через 2 секунды после
+    // Login Success (CB 0x02) отправлял Login Plugin Request (CB 0x04).
+    // Это грубое нарушение state machine протокола: как только сервер послал
+    // Login Success, клиент ожидает только Login Acknowledged (SB 0x03) и
+    // переход к Play-инициализации; случайный login-пакет 0x04 в этот момент
+    // ломал парсер Netty на стороне клиента. Механизм удалён полностью —
+    // сервер отправляет пакеты ИСКЛЮЧИТЕЛЬНО как синхронные ответы на реальные
+    // пакеты клиента, никаких таймеров/задержек в login-фазе нет.
 
     /** @param resource|false $socket */
     public function acceptNewConnection(mixed $socket): void
@@ -1926,47 +1874,55 @@ final class LoginHandler implements PacketHandler
             return;
         }
 
-        $username = StringHandler::read($packetData, $offset);
-
+        // === handleLoginStart: надёжный парсинг (оффлайн-сервер) ===
         // Protocol 763 (1.20.1), структура Login Start (C→S 0x00):
         //   [Name: String (VarInt len + UTF-8)]
         //   [Signature Data: OPTIONAL Boolean-present structure]
         //      present=true → [Timestamp: i64][Key Length: VarInt][Key: byte[]]
         //                      [Signature Length: VarInt][Signature: byte[]]
-        //   [Truncated Access Token: OPTIONAL Boolean-present, ≤35 bytes]
-        //      present=true → [Token Length: VarInt][Token: byte[]]
         //
-        // Исправления относительно прежней реализации:
-        //  1) «Optional UUID» в Login Start 763 НЕ существует — ранее код при
-        //     отсутствии подписи считал первые байты хвоста Boolean+UUID и
-        //     смещал курсор (в логах: timestamp=-7004149892657230601,
-        //     pubkey=1517726 bytes, remaining=-1517721). Кадр сам по себе не
-        //     портился (длина кадра ограничивает пакет), но поля читались
-        //     неверно. Теперь необязательные поля разбираются строго с
-        //     проверками границ и только для протоколов, где они есть.
-        //  2) Длины VarInt обязаны помещаться в остаток пакета — иначе это
-        //     битый/несовместимый пакет: соединение закрывается с понятной
-        //     причиной вместо молчаливого повреждения потока.
+        // УСТРАНЕНИЕ ОШИБКИ ПАРСИНГА (из логов: «Has Signature Data: true»,
+        // «Sig Data timestamp: -7004..., pubkey=1517726 bytes, sig=0 bytes»,
+        // «Remaining bytes after sig data: -1517721»): предыдущая реализация
+        // принимала байты UUID клиента за структуру подписи и считала из них
+        // длину открытого ключа (~1.5 млн байт), уводя offset в минус и теряя
+        // реальный UUID. Для оффлайн-сервера (online-mode=false) валидация
+        // подписи НЕ нужна — нужны только Имя и UUID. Поэтому:
+        //  1) читаем имя (String);
+        //  2) корректно пропускаем блок Signature Data (если present=true),
+        //     проверяя ВСЕ длины против остатка пакета — никакого чтения
+        //     UUID-байтов как VarInt-длин;
+        //  3) если после имени остались ровно 16 байт — нестандартный лаунчер
+        //     прислал UUID напрямую: берём его как последние 16 байт пакета;
+        //  4) иначе — fallback: детерминированный offline-UUID по имени.
+        // Vanilla-клиент 1.20.1 шлёт hasSig=false и UUID НЕ шлёт вовсе —
+        // используется offline-UUID (он же возвращается в Login Success).
 
         $total = strlen($packetData);
-        $clientUuid = '';
+        $username = StringHandler::read($packetData, $offset);
 
-        // 1. Signature Data (Boolean present) — опционально, есть во всех версиях.
+        // Username обязана присутствовать целиком (защита от усечённой строки).
+        if ($username === '' || $offset > $total) {
+            $this->disconnectMalformed($connection, 'Login Start: усечённая/пустая username-строка');
+            return;
+        }
+
+        $clientUuid = '';
         $hasSigData = false;
+
         if ($offset < $total) {
             $hasSigData = ord($packetData[$offset]) !== 0;
             $offset += 1;
         }
 
         if ($hasSigData) {
+            // Пропускаем Signature Data СТРОГО в границах пакета.
             if ($total - $offset < 8) {
                 $this->disconnectMalformed($connection, 'Login Start: усечённый Timestamp подписи');
                 return;
             }
-            $timestamp = unpack('J', substr($packetData, $offset, 8))[1] ?? 0;
-            $offset += 8;
+            $offset += 8; // timestamp (i64) — оффлайн-серверу не нужен
 
-            // Public Key: VarInt длина + байты (обязательно в пределах пакета)
             $pubKeyLen = VarInt::read($packetData, $offset) ?? -1;
             if ($pubKeyLen < 0 || $pubKeyLen > $total - $offset) {
                 $this->disconnectMalformed($connection, sprintf(
@@ -1978,7 +1934,6 @@ final class LoginHandler implements PacketHandler
             }
             $offset += $pubKeyLen;
 
-            // Signature: VarInt длина + байты
             $sigLen = VarInt::read($packetData, $offset) ?? -1;
             if ($sigLen < 0 || $sigLen > $total - $offset) {
                 $this->disconnectMalformed($connection, sprintf(
@@ -1990,32 +1945,21 @@ final class LoginHandler implements PacketHandler
             }
             $offset += $sigLen;
 
-            PacketLogger::logInfo("📅 Sig Data timestamp: $timestamp, pubkey=$pubKeyLen bytes, sig=$sigLen bytes");
+            PacketLogger::logDebug("Login Start: Signature Data пропущена (валидация не требуется, offline)");
         }
 
-        // 2. Truncated Access Token — появляется только с protocol 765 (1.20.5+).
-        //    Для 763 любых байтов после подписи быть не должно; лишнее логируем,
-        //    но поток не трогаем (кадр уже ограничен длиной из фрейма).
-        $remainingBytes = $total - $offset;
-        if ($remainingBytes > 0) {
-            if ($connection->protocol >= 765) {
-                $hasToken = ord($packetData[$offset]) !== 0;
-                $offset += 1;
-                if ($hasToken) {
-                    $tokenLen = VarInt::read($packetData, $offset) ?? -1;
-                    if ($tokenLen < 0 || $tokenLen > $total - $offset) {
-                        $this->disconnectMalformed($connection, 'Login Start: усечённый Access Token');
-                        return;
-                    }
-                    $offset += $tokenLen;
-                }
-            } else {
-                PacketLogger::logInfo(sprintf(
-                    '⚠️ Login Start (protocol %d): %d лишних байт после обязательных полей — проигнорированы',
-                    $connection->protocol,
-                    $remainingBytes
-                ));
-            }
+        // Хвост пакета: нестандартные лаунчеры могут прислать 16-байтный UUID
+        // сразу после имени (или после подписи). Берём его как последние
+        // 16 байт — без каких-либо VarInt-чтений, способных увести offset в минус.
+        $remaining = $total - $offset;
+        if ($remaining === 16) {
+            $clientUuid = Uuid::pretty(substr($packetData, $offset, 16));
+        } elseif ($remaining > 0) {
+            PacketLogger::logInfo(sprintf(
+                '⚠️ Login Start (protocol %d): %d лишних байт после обязательных полей — проигнорированы',
+                $connection->protocol,
+                $remaining
+            ));
         }
 
         $connection->username = $username;
@@ -2026,6 +1970,7 @@ final class LoginHandler implements PacketHandler
             // а не генерируем новый — иначе клиент отвалится на проверке UUID
             // в Login Success / Join Game.
             $connection->uuid = $clientUuid;
+            PacketLogger::logInfo("🎯 Client-provided UUID: {$clientUuid}");
         } elseif ($connection->uuid === '') {
             $connection->uuid = Uuid::fromUsername($username);
             PacketLogger::logInfo("🎲 Generated offline UUID: {$connection->uuid}");
@@ -2098,28 +2043,19 @@ final class LoginHandler implements PacketHandler
             substr($successFrame, 2, 16) === Uuid::toBinary($connection->uuid),
             'Login Success содержит чужой UUID'
         );
-        PacketLogger::logInfo(sprintf(
-            "✅ Login Success sent (%d bytes) клиенту %d: raw=%s",
-            strlen($successFrame),
-            $connection->id,
-            bin2hex($successFrame)
-        ));
+        PacketLogger::logInfo("⬅️ Sent Login Success (0x02) клиенту {$connection->id}");
         PacketLogger::logInfo("⏳ Waiting for Login Acknowledged (0x03)... соединение НЕ закрываем, сокет жив");
 
-        // ВАЖНО (протокол 763): минимальный корректный login flow заканчивается
-        // на Login Success; далее сервер ОБЯЗАН только ждать Login Acknowledged
-        // (SB 0x03). Прежний «fallback» планировал отправку Login Plugin Request
-        // (CB 0x04) через 2 секунды — это нарушало протокол:
-        //  - vanilla-клиент 1.20.1 шлёт ACK сразу после Login Success, поэтому
-        //    к моменту срабатывания таймера соединение уже в Play, а случайная
-        //    гонка (ACK в том же TCP-сегменте + порядок тиков цикла) могла
-        //    привести к отправке login-пакета в play-состояние;
-        //  - именно этот пакет (frame len=0x25=37, id=0x04, payload 35 байт)
-        //    вызывал у клиента DecoderException «Packet 0/4 ... found 36 bytes
-        //    extra whilst reading packet 4».
-        // Поэтому отложенная fallback-отправка удалена полностью. Отправлять
-        // Plugin Request можно только как осмысленный ответ на конкретный
-        // запрос клиента, а не «ради проверки соединения».
+        // ВАЖНО (протокол 763 / устранение DecoderException):
+        // сразу после Login Success сервер ОБЯЗАН только ЖДАТЬ Login
+        // Acknowledged (SB 0x03). Прежняя реализация через 2 секунды
+        // отправляла Login Plugin Request (CB 0x04) — грубое нарушение
+        // state machine: login-фаза уже завершена и клиент, ожидающий ACK/
+        // play-пакеты, падал с
+        //   DecoderException: Packet 0/4 (uv) was larger than I expected,
+        //   found 36 bytes extra whilst reading packet 4.
+        // Механизм отложенной отправки удалён полностью: ни sleep, ни
+        // таймеров, ни CB 0x04 после CB 0x02 — никогда.
     }
 
     /** Закрытие соединения с понятной причиной (битый/несовместимый пакет). */
@@ -2445,7 +2381,10 @@ final class MinecraftServer
         while ($this->running) {
             $this->acceptConnections();
             $this->connectionManager->processConnections();
-            $this->connectionManager->tickDelayedPackets();
+            // ВАЖНО: никакой «отправки отложенных пакетов» здесь больше нет —
+            // именно она (Login Plugin Request 0x04 через 2 сек после Login
+            // Success) вызывала DecoderException у клиента. Все исходящие
+            // пакеты отправляются синхронно в обработчиках входящих пакетов.
             $this->tickChunkStreaming();
             $this->connectionManager->flushOutBuffers();
             $this->tickEarlyKeepAlives();
@@ -2575,12 +2514,13 @@ final class MinecraftServer
                 return;
             }
 
-            // Перехват Login Plugin Response (0x02) — ответ на fallback-запрос
-            // minecraft:brand. В 763 ACK приходит независимо, поэтому здесь
-            // только логируем и гасим pending-запрос.
+            // Перехват Login Plugin Response (0x02) — редкий случай: клиент
+            // ответил на какой-либо осмысленный login-plugin-запрос. Никаких
+            // plugin-запросов сервер НЕ отправляет (см. устранение
+            // DecoderException), поэтому здесь только логируем и продолжаем
+            // ждать нормальный Login Acknowledged (0x03).
             if ($connection->state === ProtocolState::Login && $packetId === PacketId::SB_LOGIN_PLUGIN_RESPONSE) {
-                $connection->pluginRequestState = 'answered';
-                PacketLogger::logInfo("✅ Login Plugin Response (0x02) от клиента $clientId — brand подтверждён");
+                PacketLogger::logInfo("➡️ Login Plugin Response (0x02) от клиента $clientId — проигнорирован (plugin requests не используются)");
 
                 return;
             }
