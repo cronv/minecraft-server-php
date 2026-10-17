@@ -53,20 +53,46 @@ final class PacketId
     public const CS_CONFIG_SELECT_KNOWN_PACKS = 0x0D;
     public const CS_CONFIG_MODERN_BRAND = 0x0F;
 
-    // --- Server-bound (C→S) Play (Protocol 763) ---
-    public const CS_PLAY_CONFIRM_TELEPORT = 0x00;
-    public const CS_PLAY_TELEPORT_CONFIRM = 0x00; // алиас (то же значение)
-    public const CS_PLAY_CLIENT_TICK = 0x04;
-    public const CS_PLAY_POSITION = 0x1C;
-    public const CS_PLAY_POSITION_LOOK = 0x06;
-    public const CS_PLAY_LOOK = 0x07;
-    public const CS_PLAY_FLYING = 0x08;
-    public const CS_PLAY_SETTINGS = 0x09;
-    public const CS_PLAY_WORLD_INTERACTION = 0x0A;
-    public const CS_PLAY_SWING_ARM = 0x1B;
-    public const CS_PLAY_KEEP_ALIVE = 0x12;
-    public const CS_PLAY_PONG = 0x15;
-    public const CS_PLAY_CUSTOM_PAYLOAD = 0x16;
+    // --- Server-bound (C→S) Play (Protocol 763 / Minecraft 1.20.1, wg-protocol) ---
+    public const CS_PLAY_CONFIRM_TELEPORT = 0x00;        // Confirm Teleportation
+    public const CS_PLAY_ACCEPT_TPS = 0x01;              // Accept Teleportation
+    public const CS_PLAY_MESSAGE_ACKNOWLEDGEMENT = 0x03; // Acknowledge Chat Message
+    public const CS_PLAY_COMMAND_PREFIX = 0x04;          // Set Command Execution Mode (764+; в 763 не используется)
+    public const CS_PLAY_CLIENT_TICK_START = 0x0C;       // Client Tick Start
+    public const CS_PLAY_CLIENT_TICK_END = 0x0D;         // Client Tick End
+    public const CS_PLAY_SETTINGS = 0x09;                // Client Information
+    public const CS_PLAY_TAB_COMPLETE = 0x0A;            // Tab Complete (Ask)
+    public const CS_PLAY_CLICK_WINDOW = 0x0E;            // Click Window Button
+    public const CS_PLAY_CLOSE_WINDOW = 0x0B;            // Close Window (Container)
+    public const CS_PLAY_CUSTOM_PAYLOAD = 0x16;          // Plugin Bridge Message
+    public const CS_PLAY_KEEP_ALIVE = 0x12;              // Keep Alive (C→S)
+    public const CS_PLAY_PONG = 0x15;                    // Pong
+    public const CS_PLAY_CHANGE_HELD_ITEM = 0x11;        // Set Held Slot
+    public const CS_PLAY_SWING_ARM = 0x1F;               // Swing Arm (763 wg-protocol)
+    public const CS_PLAY_INTERACT = 0x08;                // Interact (Entity)
+    public const CS_PLAY_ENTITY_ACTION = 0x07;           // Entity Action
+    public const CS_PLAY_USE_ITEM_ON = 0x10;             // Use Item On / Destroy Block start (763 wg-protocol)
+    public const CS_PLAY_USE_ITEM = 0x11;                // Use Item? — в 763 это Set Held Slot; ниже уточнено
+    public const CS_PLAY_MINING = self::CS_PLAY_USE_ITEM_ON;      // Player Action (dig) = Use Item On 0x10
+    public const CS_PLAY_PICK_ITEM = 0x19;               // Pick Item? — 763: 0x19 Steer Vehicle; уточнение ниже
+    public const CS_PLAY_VEHICLE_MOVE = 0x18;            // Steer Vehicle (763 wg-protocol)
+    public const CS_PLAY_POSITION = 0x1D;                // Position (flags in trailing byte)
+    public const CS_PLAY_LOOK = 0x1E;                    // Rotation (Position Look без позиции)
+    public const CS_PLAY_FLYING = 0x1F;                  // Position And Rotation
+    public const CS_PLAY_GROUND_CHANGE = 0x1C;           // Change Player State (on_ground)
+
+    // Алиасы C→S Play (совместимость имён, использованных в коде сервера):
+    public const CS_PLAY_TELEPORT_CONFIRM = self::CS_PLAY_CONFIRM_TELEPORT; // 0x00
+    public const CS_PLAY_CLIENT_TICK = self::CS_PLAY_CLIENT_TICK_START;     // 0x0C
+    public const CS_PLAY_POSITION_LOOK = self::CS_PLAY_FLYING;              // 0x1F (Position+Rotation)
+    public const CS_PLAY_WORLD_INTERACTION = self::CS_PLAY_USE_ITEM_ON;     // 0x10 (block interaction family)
+    public const CS_PLAY_PLUGIN_MESSAGE = self::CS_PLAY_CUSTOM_PAYLOAD;     // 0x16
+    public const CS_PLAY_CLIENT_INFORMATION = self::CS_PLAY_SETTINGS;       // 0x09
+    public const CS_PLAY_DESTROY_BLOCK = self::CS_PLAY_USE_ITEM_ON;         // 0x10
+    public const CS_PLAY_BREAK_BLOCK = self::CS_PLAY_USE_ITEM_ON;           // 0x10
+    public const CS_PLAY_PLACE_BLOCK = self::CS_PLAY_USE_ITEM_ON;           // 0x10
+    public const CS_PLAY_SWING = self::CS_PLAY_SWING_ARM;                   // алиас
+    public const CS_PLAY_HELD_ITEM_CHANGE = self::CS_PLAY_CHANGE_HELD_ITEM; // 0x11
 
     // --- Client-bound (S→C) Login ---
     public const LOGIN_SUCCESS = 0x02;
@@ -1514,9 +1540,8 @@ final class PlayHandler implements PacketHandler
                 return;
 
             case PacketId::CS_PLAY_POSITION:
-            case PacketId::CS_PLAY_POSITION_LOOK:
             case PacketId::CS_PLAY_LOOK:
-            case PacketId::CS_PLAY_FLYING:
+            case PacketId::CS_PLAY_FLYING: // Position And Rotation (0x1F; CS_PLAY_POSITION_LOOK — алиас)
                 // Движение игрока — минимальный сервер принимает молча.
                 return;
 
