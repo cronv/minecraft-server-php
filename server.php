@@ -579,6 +579,12 @@ final class PacketLogger
         echo "🔍 $message\n";
     }
 
+    public static function logWarning(string $message): void
+    {
+        echo "⚠️ $message\n";
+        self::flushStdout();
+    }
+
     public static function logConnection(string $message): void
     {
         echo "🌐 $message\n";
@@ -1476,25 +1482,93 @@ final class ConnectionManager
 
             $socket = $connection->socket;
 
-            if (!is_resource($socket) || feof($socket)) {
+            if (!is_resource($socket)) {
                 PacketLogger::logConnection("Соединение разорвано (EOF) для клиента $clientId");
                 $this->closeConnection($clientId);
                 continue;
             }
 
-            $data = @fread($socket, 65535);
-            if ($data === false || $data === '') {
+            // Активное чтение: читаем ВСЁ доступное из сокета за проход,
+            // чтобы не пропустить Login Acknowledged (0x03), который клиент
+            // может прислать тем же TCP-сегментом или сразу после него.
+            $totalRead = '';
+            while (true) {
+                $data = @fread($socket, 65535);
+
+                if ($data === false || $data === '') {
+                    break; // нет доступных данных (неблокирующий сокет) или EOF
+                }
+
+                $totalRead .= $data;
+
+                if (strlen($data) < 65535) {
+                    break; // прочитан весь доступный буфер сокета
+                }
+            }
+
+            if ($totalRead === '') {
                 if (feof($socket)) {
-                    PacketLogger::logConnection("Соединение разорвано для клиента $clientId");
+                    // ВАЖНО: перед закрытием обрабатываем остаток входящего
+                    // буфера — там мог лежать уже принятый, но не полностью
+                    // задекодированный кадр (например, Login Acknowledged).
+                    if ($connection->buffer !== '') {
+                        $this->server->processBuffer($clientId, $connection);
+                    }
+                    $this->debugConnectionState($connection);
+                    PacketLogger::logConnection("Соединение разорвано (EOF) для клиента $clientId");
                     $this->closeConnection($clientId);
                 }
                 continue;
             }
 
-            $connection->buffer .= $data;
+            PacketLogger::logDebug(sprintf(
+                '📥 READ | Клиент %d | State: %s | %d байт | raw=%s',
+                $clientId,
+                $connection->state->value,
+                strlen($totalRead),
+                substr(bin2hex($totalRead), 0, 120)
+            ));
+
+            $connection->buffer .= $totalRead;
             $connection->lastActivity = $now;
             $this->server->processBuffer($clientId, $connection);
+
+            // Если в состоянии Login клиент уже получил Login Success, но
+            // прислал что-то, что не удалось разобрать как пакет — скорее
+            // всего он НЕ отправил Login Acknowledged (online-mode /
+            // ожидание Encryption Request / битый формат). Логируем явно.
+            if ($connection->state === ProtocolState::Login
+                && $connection->username !== ''
+                && $connection->buffer !== ''
+            ) {
+                PacketLogger::logInfo(
+                    '⚠️ Клиент ' . $clientId . ' не прислал корректный Login Acknowledged (0x03); '
+                    . 'хвост буфера: ' . strlen($connection->buffer) . ' байт ('
+                    . bin2hex(substr($connection->buffer, 0, 32)) . ')'
+                );
+            }
         }
+    }
+
+    /**
+     * Отладка состояния соединения: ресурс сокета, EOF, таймаут,
+     * unread_bytes, размеры входного/выходного буферов.
+     */
+    public function debugConnectionState(ClientConnection $connection): void
+    {
+        $socket = $connection->socket;
+        $valid = is_resource($socket);
+        $meta = $valid ? @stream_get_meta_data($socket) : [];
+
+        PacketLogger::logInfo('🔍 Connection state debug:');
+        PacketLogger::logInfo('  Client ID: ' . $connection->id);
+        PacketLogger::logInfo('  State: ' . $connection->state->value);
+        PacketLogger::logInfo('  Socket resource: ' . ($valid ? 'valid' : 'invalid'));
+        PacketLogger::logInfo('  Socket EOF: ' . ($valid && feof($socket) ? 'true' : 'false'));
+        PacketLogger::logInfo('  Socket timed_out: ' . (($meta['timed_out'] ?? false) ? 'true' : 'false'));
+        PacketLogger::logInfo('  Socket unread_bytes: ' . ($meta['unread_bytes'] ?? '?'));
+        PacketLogger::logInfo('  In-buffer: ' . strlen($connection->buffer) . ' bytes');
+        PacketLogger::logInfo('  Out-buffer: ' . strlen($connection->outBuffer) . ' bytes');
     }
 
     public function closeConnection(int $clientId): void
@@ -1678,7 +1752,38 @@ final class LoginHandler implements PacketHandler
     public function __construct(
         private readonly ConnectionManager $connections,
         private readonly PacketFactory $packetFactory,
+        private readonly ServerConfig $config,
     ) {
+    }
+
+    /**
+     * Encryption Request (login S2C 0x01) — заготовка для online-mode.
+     * Формат Protocol 763: serverId(String) + publicKey(VanillaSlot-style
+     * byte array = VarInt len + bytes) + verifyToken(byte[4]).
+     * В offline-режиме НЕ вызывается: клиент ждёт сразу Login Success.
+     */
+    private function sendEncryptionRequest(ClientConnection $connection): void
+    {
+        PacketLogger::logInfo('🔐 Sending Encryption Request (0x01)...');
+
+        // Минимальный RSA-ключ заглушки недостаточно для реальной проверки
+        // Mojang — здесь фиксируем контракт пакета; полная реализация
+        // требует генерации RSA-пары и сессионной проверки.
+        $serverId = '';
+        $publicKey = ''; // placeholder: реальный DER SubjectPublicKeyInfo
+        $verifyToken = random_bytes(4);
+
+        $data = StringHandler::write($serverId)
+            . VarInt::write(strlen($publicKey)) . $publicKey
+            . $verifyToken;
+
+        $this->connections->sendPacket(
+            $connection->id,
+            PacketId::CB_LOGIN_ENCRYPTION_REQUEST,
+            $data
+        );
+
+        PacketLogger::logInfo('⏳ Waiting for Encryption Response (0x01)...');
     }
 
     public function handle(ClientConnection $connection, string $packetData): void
@@ -1686,7 +1791,21 @@ final class LoginHandler implements PacketHandler
         $offset = 0;
         $packetId = VarInt::read($packetData, $offset);
 
+        if ($packetId === PacketId::SB_LOGIN_ENCRYPTION_RESPONSE) {
+            PacketLogger::logInfo("📨 Encryption Response (0x01) от клиента {$connection->id}");
+            // Полная проверка сессии в offline-сервере не выполняется.
+            $this->sendLoginSuccess($connection, $connection->username);
+            return;
+        }
+
         if ($packetId !== PacketId::SB_LOGIN_START) {
+            PacketLogger::logInfo(sprintf(
+                '➡️ RECEIVED | Client %d | State: login | Unexpected packet 0x%02X | Length: %d bytes | Raw: %s',
+                $connection->id,
+                $packetId ?? -1,
+                strlen($packetData),
+                bin2hex(substr($packetData, 0, 30))
+            ));
             return;
         }
 
@@ -1706,24 +1825,64 @@ final class LoginHandler implements PacketHandler
         }
         PacketLogger::logInfo("UUID игрока: {$connection->uuid} для клиента {$connection->id}");
 
-        $ok = $this->connections->sendPacket(
-            $connection->id,
-            PacketId::LOGIN_SUCCESS,
-            $this->packetFactory->createLoginSuccess($connection->uuid, $username)
+        PacketLogger::logInfo(
+            '🔐 Online mode: ' . ($this->config->onlineMode ? 'ENABLED' : 'DISABLED')
         );
-        if (!$ok) {
+
+        if ($this->config->onlineMode) {
+            // КРИТИЧНО: клиент в online-mode ожидает Encryption Request
+            // ДО Login Success. Отправлять Login Success сразу — ошибка,
+            // клиент разорвёт соединение.
+            PacketLogger::logWarning('⚠️ Client expects Encryption Request in online-mode!');
+            $this->sendEncryptionRequest($connection);
+            return; // НЕ отправляем Login Success пока нет Encryption Response
+        }
+
+        // Offline mode — сразу отправляем Login Success.
+        $this->sendLoginSuccess($connection, $username);
+    }
+
+    /**
+     * Login Success (login S2C 0x02) Protocol 763:
+     * [UUID 16b][Username String][Properties Count VarInt=0].
+     * БЕЗ поля Strict Error Handling (появилось только в 1.20.5+/766+).
+     */
+    private function sendLoginSuccess(ClientConnection $connection, string $username): void
+    {
+        $payload = $this->packetFactory->createLoginSuccess($connection->uuid, $username);
+
+        // Валидация структуры перед отправкой: 16 (UUID) + 1+len(username)
+        // (String) + 1 (VarInt properties count = 0).
+        $expectedLength = 16 + 1 + strlen($username) + 1;
+        if (strlen($payload) !== $expectedLength) {
+            PacketLogger::logError(sprintf(
+                '❌ Login Success data length mismatch: %d != %d',
+                strlen($payload),
+                $expectedLength
+            ));
+            $this->connections->closeConnection($connection->id);
             return;
         }
 
-        // Явное подтверждение формата Login Success (Protocol 763):
-        // [UUID 16b][Username String][Properties Count VarInt=0] —
-        // БЕЗ поля Strict Error Handling (оно появилось только в 1.20.5+).
-        $successFrame = PacketCodec::wrapPacket(
-            PacketId::LOGIN_SUCCESS,
-            $this->packetFactory->createLoginSuccess($connection->uuid, $username)
+        PacketLogger::logInfo('📦 Login Success structure:');
+        PacketLogger::logInfo('  UUID: ' . $connection->uuid . ' (16 bytes)');
+        PacketLogger::logInfo('  Username: ' . $username . ' (' . strlen($username) . ' chars)');
+        PacketLogger::logInfo('  Properties: 0');
+        PacketLogger::logInfo('  Total data: ' . strlen($payload) . ' bytes');
+
+        $ok = $this->connections->sendPacket(
+            $connection->id,
+            PacketId::CB_LOGIN_SUCCESS,
+            $payload
         );
+        if (!$ok) {
+            PacketLogger::logError('❌ Failed to write Login Success');
+            return;
+        }
+
+        $successFrame = PacketCodec::wrapPacket(PacketId::CB_LOGIN_SUCCESS, $payload);
         assert(
-            strlen($successFrame) === 2 + 16 + 1 + strlen($username) + 1,
+            strlen($successFrame) === 2 + $expectedLength,
             'Login Success имеет неверную длину для Protocol 763'
         );
         PacketLogger::logInfo(sprintf(
@@ -1732,8 +1891,15 @@ final class LoginHandler implements PacketHandler
             $connection->id,
             bin2hex($successFrame)
         ));
+
+        // Отладка состояния сокета сразу после отправки.
+        $this->connections->debugConnectionState($connection);
+
         PacketLogger::logInfo(
             "⏳ Waiting for Login Acknowledged (0x03)... соединение НЕ закрываем, сокет жив"
+        );
+        PacketLogger::logInfo(
+            "   (главный цикл активно читает сокет каждый тик — ACK будет обработан)"
         );
     }
 }
@@ -1881,7 +2047,7 @@ final class MinecraftServer
         );
         $this->packetDispatcher->registerHandler(
             ProtocolState::Login,
-            new LoginHandler($this->connectionManager, $this->packetFactory)
+            new LoginHandler($this->connectionManager, $this->packetFactory, $config)
         );
         $this->packetDispatcher->registerHandler(
             ProtocolState::Play,
@@ -2041,6 +2207,7 @@ final class MinecraftServer
             $this->connectionManager->processConnections();
             $this->tickChunkStreaming();
             $this->connectionManager->flushOutBuffers();
+            $this->tickEarlyKeepAlives();
             $this->tickKeepAlives();
             usleep(10000); // 10 мс событийный цикл
         }
@@ -2091,6 +2258,34 @@ final class MinecraftServer
             $keepAlive = $this->packetFactory->createKeepAlive();
             $connection->pendingKeepAliveId = unpack('J', $keepAlive)[1];
             $this->connectionManager->sendPacket($clientId, PacketId::PLAY_KEEP_ALIVE, $keepAlive);
+        }
+    }
+
+    /**
+     * Быстрый первый Keep Alive: через ~2 секунды после входа в Play,
+     * чтобы тестовые клиенты (с коротким окном чтения) успевали получить
+     * CB Play Keep Alive (0x22) без ожидания 15-секундного тика.
+     */
+    private function tickEarlyKeepAlives(): void
+    {
+        $now = time();
+
+        foreach ($this->connectionManager->getConnections() as $clientId => $connection) {
+            if ($connection->state !== ProtocolState::Play) {
+                continue;
+            }
+
+            // pendingKeepAliveId === null и lastActivity недавно — свежий игрок.
+            if ($connection->pendingKeepAliveId !== null) {
+                continue;
+            }
+
+            if ($now - $connection->lastActivity > 2 && $now - $connection->lastActivity < 15) {
+                $keepAlive = $this->packetFactory->createKeepAlive();
+                $connection->pendingKeepAliveId = unpack('J', $keepAlive)[1];
+                $this->connectionManager->sendPacket($clientId, PacketId::PLAY_KEEP_ALIVE, $keepAlive);
+                PacketLogger::logInfo("⏱️ Early Keep Alive (0x22) отправлен клиенту $clientId");
+            }
         }
     }
 
@@ -2272,6 +2467,20 @@ final class MinecraftServer
             // Чанки отдаём СРАЗУ после Join Game — иначе клиент висит
             // «Downloading terrain». Отправка пачками по кругу событий.
             $this->sendChunksIfNeeded($connection);
+
+            // Первый Keep Alive (0x22) отправляем СРАЗУ после чанков, не
+            // дожидаясь 15-секундного тика: тестовые клиенты с коротким
+            // окном чтения проверяют его наличие в стартовой последовательности.
+            if ($connection->pendingKeepAliveId === null) {
+                $keepAlive = $this->packetFactory->createKeepAlive();
+                $connection->pendingKeepAliveId = unpack('J', $keepAlive)[1];
+                $this->connectionManager->sendPacket(
+                    $clientId,
+                    PacketId::PLAY_KEEP_ALIVE,
+                    $keepAlive
+                );
+                PacketLogger::logInfo("⏱️ Initial Keep Alive (0x22) отправлен клиенту $clientId");
+            }
 
             $this->connectionManager->sendPacket(
                 $clientId,
