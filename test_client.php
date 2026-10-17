@@ -86,33 +86,33 @@ while (microtime(true) < $deadline) {
     if ($p === null) break;
     $seen[] = $p['id'];
     $desc = '';
-    if ($p['id'] === 0x28) {
+    if ($p['id'] === 0x27) { // CB_PLAY_LOGIN (Join Game), Protocol 763
         $off = 0;
         $eid = unpack('V', strrev(substr($p['data'], $off, 4)))[1]; $off += 4;
         $gamemode = ord($p['data'][$off]); $off += 1;
         $dim = vi_read($p['data'], $off);
         $desc = " entityId=$eid gamemode=$gamemode dimId=$dim";
     }
-    if ($p['id'] === 0x3C) {
+    if ($p['id'] === 0x3A) { // CB_PLAY_PLAYER_POSITION (Teleport), Protocol 763
         $f = array_values(unpack('E*', substr($p['data'], 0, 24)));
         $desc = " x={$f[0]} y={$f[1]} z={$f[2]}";
     }
     echo "<- PLAY id=0x" . dechex($p['id']) . " len=" . strlen($p['data']) . $desc . "\n";
-    if ($p['id'] === 0x23) { // keep alive S2C: respond
+    if ($p['id'] === 0x22) { // CB_PLAY_KEEP_ALIVE S2C: respond SB 0x15
         $ka = substr($p['data'], 0, 8);
-        fwrite($sock, frame(vi(0x12) . $ka));
+        fwrite($sock, frame(vi(0x15) . $ka));
         echo "-> KeepAlive reply\n";
     }
-    if ($p['id'] === 0x3C) { // teleport -> confirm
+    if ($p['id'] === 0x3A) { // teleport -> SB_PLAY_ACCEPT_TELEPORTATION (0x00)
         $tmpoff = 0;
         $tid = vi_read($p['data'], $tmpoff);
         fwrite($sock, frame(vi(0x00) . vi($tid)));
-        echo "-> TeleportConfirm $tid\n";
+        echo "-> AcceptTeleportation $tid\n";
     }
     if (count($seen) >= 25) break;
 }
 
-$need = [0x28, 0x3A, 0x3C, 0x24, 0x1F];
+$need = [0x27, 0x38, 0x3A, 0x21, 0x22]; // JoinGame, PlayerInfoUpdate, Position, GameEvent, KeepAlive
 $missing = array_diff($need, $seen);
 echo "TOTAL packets seen: " . count($seen) . "\n";
 if ($missing) {
