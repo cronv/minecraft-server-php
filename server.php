@@ -42,71 +42,35 @@ declare(strict_types=1);
  */
 final class PacketId
 {
-    // --- Server-bound (C→S) Login ---
-    public const CS_LOGIN_START = 0x00;
-    public const CS_LOGIN_PLUGIN_RESPONSE = 0x02;
-    public const CS_LOGIN_ACKNOWLEDGED = 0x03;
+    // =========================================================================
+    // Handshake State
+    // =========================================================================
+    public const SB_HANDSHAKE = 0x00;         // Client → Server
 
     // =========================================================================
     // Status State
     // =========================================================================
-    public const CB_STATUS_RESPONSE = 0x00;   // Server → Client
-    public const CB_STATUS_PONG = 0x01;       // Server → Client
     public const SB_STATUS_REQUEST = 0x00;    // Client → Server
+    public const CB_STATUS_RESPONSE = 0x00;   // Server → Client
     public const SB_STATUS_PING = 0x01;       // Client → Server
+    public const CB_STATUS_PONG = 0x01;       // Server → Client
 
-    // --- Server-bound (C→S) Play (Protocol 763 / Minecraft 1.20.1, wg-protocol) ---
-    public const CS_PLAY_CONFIRM_TELEPORT = 0x00;        // Confirm Teleportation
-    public const CS_PLAY_ACCEPT_TPS = 0x01;              // Accept Teleportation
-    public const CS_PLAY_MESSAGE_ACKNOWLEDGEMENT = 0x03; // Acknowledge Chat Message
-    public const CS_PLAY_COMMAND_PREFIX = 0x04;          // Set Command Execution Mode (764+; в 763 не используется)
-    public const CS_PLAY_CLIENT_TICK_START = 0x0C;       // Client Tick Start
-    public const CS_PLAY_CLIENT_TICK_END = 0x0D;         // Client Tick End
-    public const CS_PLAY_SETTINGS = 0x09;                // Client Information
-    public const CS_PLAY_TAB_COMPLETE = 0x0A;            // Tab Complete (Ask)
-    public const CS_PLAY_CLICK_WINDOW = 0x0E;            // Click Window Button
-    public const CS_PLAY_CLOSE_WINDOW = 0x0B;            // Close Window (Container)
-    public const CS_PLAY_CUSTOM_PAYLOAD = 0x16;          // Plugin Bridge Message
-    public const CS_PLAY_KEEP_ALIVE = 0x12;              // Keep Alive (C→S)
-    public const CS_PLAY_PONG = 0x15;                    // Pong
-    public const CS_PLAY_CHANGE_HELD_ITEM = 0x11;        // Set Held Slot
-    public const CS_PLAY_SWING_ARM = 0x1F;               // Swing Arm (763 wg-protocol)
-    public const CS_PLAY_INTERACT = 0x08;                // Interact (Entity)
-    public const CS_PLAY_ENTITY_ACTION = 0x07;           // Entity Action
-    public const CS_PLAY_USE_ITEM_ON = 0x10;             // Use Item On / Destroy Block start (763 wg-protocol)
-    public const CS_PLAY_USE_ITEM = 0x11;                // Use Item? — в 763 это Set Held Slot; ниже уточнено
-    public const CS_PLAY_MINING = self::CS_PLAY_USE_ITEM_ON;      // Player Action (dig) = Use Item On 0x10
-    public const CS_PLAY_PICK_ITEM = 0x19;               // Pick Item? — 763: 0x19 Steer Vehicle; уточнение ниже
-    public const CS_PLAY_VEHICLE_MOVE = 0x18;            // Steer Vehicle (763 wg-protocol)
-    public const CS_PLAY_POSITION = 0x1D;                // Position (flags in trailing byte)
-    public const CS_PLAY_LOOK = 0x1E;                    // Rotation (Position Look без позиции)
-    public const CS_PLAY_FLYING = 0x1F;                  // Position And Rotation
-    public const CS_PLAY_GROUND_CHANGE = 0x1C;           // Change Player State (on_ground)
+    // =========================================================================
+    // Login State (Server-bound, C→S)
+    // =========================================================================
+    public const SB_LOGIN_START = 0x00;                 // Бывший CS_LOGIN_START
+    public const SB_LOGIN_ENCRYPTION_RESPONSE = 0x01;   // Client → Server
+    public const SB_LOGIN_PLUGIN_RESPONSE = 0x02;       // Client → Server (Бывший CS_LOGIN_PLUGIN_RESPONSE)
+    public const SB_LOGIN_LOGIN_ACKNOWLEDGED = 0x03;    // Client → Server (Бывший CS_LOGIN_ACKNOWLEDGED)
 
-    // Алиасы C→S Play (совместимость имён, использованных в коде сервера):
-    public const CS_PLAY_TELEPORT_CONFIRM = self::CS_PLAY_CONFIRM_TELEPORT; // 0x00
-    public const CS_PLAY_CLIENT_TICK = self::CS_PLAY_CLIENT_TICK_START;     // 0x0C
-    public const CS_PLAY_POSITION_LOOK = self::CS_PLAY_FLYING;              // 0x1F (Position+Rotation)
-    public const CS_PLAY_WORLD_INTERACTION = self::CS_PLAY_USE_ITEM_ON;     // 0x10 (block interaction family)
-    public const CS_PLAY_PLUGIN_MESSAGE = self::CS_PLAY_CUSTOM_PAYLOAD;     // 0x16
-    public const CS_PLAY_CLIENT_INFORMATION = self::CS_PLAY_SETTINGS;       // 0x09
-    public const CS_PLAY_DESTROY_BLOCK = self::CS_PLAY_USE_ITEM_ON;         // 0x10
-    public const CS_PLAY_BREAK_BLOCK = self::CS_PLAY_USE_ITEM_ON;           // 0x10
-    public const CS_PLAY_PLACE_BLOCK = self::CS_PLAY_USE_ITEM_ON;           // 0x10
-    public const CS_PLAY_SWING = self::CS_PLAY_SWING_ARM;                   // алиас
-    public const CS_PLAY_HELD_ITEM_CHANGE = self::CS_PLAY_CHANGE_HELD_ITEM; // 0x11
-
-    // --- Client-bound (S→C) Login ---
-    public const LOGIN_DISCONNECT = 0x00;
-    public const LOGIN_ENCRYPTION_REQUEST = 0x01;
-    public const LOGIN_SUCCESS = 0x02;
-    public const LOGIN_SET_COMPRESSION = 0x03;
-    public const LOGIN_PLUGIN_REQUEST = 0x04;
-    /** Алиас в стиле CB_/SB_ (Protocol 763). */
-    public const CB_LOGIN_PLUGIN_REQUEST = self::LOGIN_PLUGIN_REQUEST;
-    public const CB_LOGIN_SUCCESS = self::LOGIN_SUCCESS;
-    public const SB_LOGIN_START = self::CS_LOGIN_START;
-    public const SB_LOGIN_LOGIN_ACKNOWLEDGED = self::CS_LOGIN_ACKNOWLEDGED;
+    // =========================================================================
+    // Login State (Client-bound, S→C)
+    // =========================================================================
+    public const CB_LOGIN_DISCONNECT = 0x00;            // Server → Client
+    public const CB_LOGIN_ENCRYPTION_REQUEST = 0x01;    // Server → Client
+    public const CB_LOGIN_SUCCESS = 0x02;               // Server → Client
+    public const CB_LOGIN_SET_COMPRESSION = 0x03;       // Server → Client
+    public const CB_LOGIN_PLUGIN_REQUEST = 0x04;        // Server → Client
 
     // =========================================================================
     // Configuration State (в Protocol 763 не используется; таблица приведена
@@ -130,6 +94,8 @@ final class PacketId
 
     // Serverbound Configuration (Client → Server)
     public const SB_CONFIG_CLIENT_INFORMATION = 0x00;
+    /** Короткий алиас (Protocol 763): Client Information -> "Client Info". */
+    public const SB_CONFIG_CLIENT_INFO = self::SB_CONFIG_CLIENT_INFORMATION;   // 0x00
     public const SB_CONFIG_PLUGIN_MESSAGE = 0x01;
     public const SB_CONFIG_ACKNOWLEDGE_FINISH_CONFIGURATION = 0x02;
     public const SB_CONFIG_KEEP_ALIVE = 0x03;
@@ -320,8 +286,6 @@ final class PacketId
     // =========================================================================
 
     // --- Старые Server-bound (C→S) алиасы → SB_* ---
-    public const CS_LOGIN_START = self::SB_LOGIN_START;                         // 0x00
-    public const CS_LOGIN_ACKNOWLEDGED = self::SB_LOGIN_LOGIN_ACKNOWLEDGED;     // 0x03
 
     public const CS_CONFIG_PLUGIN_MESSAGE = self::SB_CONFIG_PLUGIN_MESSAGE;                     // 0x01
     public const CS_CONFIG_FINISHED_ACK = self::SB_CONFIG_ACKNOWLEDGE_FINISH_CONFIGURATION;     // 0x02
@@ -335,14 +299,7 @@ final class PacketId
     public const CS_CONFIG_DELETE_STRUCTURE = 0x08;  // вне таблицы 763 (удалён) — заглушка
     public const CS_CONFIG_MODERN_BRAND = 0x09;    // вне таблицы 763 (удалён) — заглушка
 
-    public const CS_PLAY_CONFIRM_TELEPORT = self::SB_PLAY_ACCEPT_TELEPORTATION;  // 0x00
-    public const CS_PLAY_TELEPORT_CONFIRM = self::SB_PLAY_ACCEPT_TELEPORTATION;  // 0x00 (алиас)
-    public const CS_PLAY_CLIENT_TICK = self::SB_PLAY_CHAT_ACK;                   // 0x03
     public const CS_PLAY_CHAT_COMMAND = self::SB_PLAY_CHAT_COMMAND;              // 0x04
-    public const CS_PLAY_POSITION = self::SB_PLAY_MOVE_PLAYER_POS;               // 0x17
-    public const CS_PLAY_POSITION_LOOK = self::SB_PLAY_MOVE_PLAYER_POS_ROT;      // 0x18
-    public const CS_PLAY_LOOK = self::SB_PLAY_MOVE_PLAYER_ROT;                   // 0x19
-    public const CS_PLAY_FLYING = self::SB_PLAY_MOVE_PLAYER_STATUS_ONLY;         // 0x1A
     public const CS_PLAY_SETTINGS = self::SB_PLAY_CLIENT_INFORMATION;            // 0x0A
     public const CS_PLAY_WORLD_INTERACTION = self::SB_PLAY_USE_ITEM_ON;          // 0x34
     public const CS_PLAY_SWING_ARM = self::SB_PLAY_SWING;                        // 0x32
@@ -351,7 +308,6 @@ final class PacketId
     public const CS_PLAY_CUSTOM_PAYLOAD = self::SB_PLAY_CUSTOM_PAYLOAD;          // 0x10
 
     // --- Старые Client-bound (S→C) алиасы → CB_* (значения исправлены!) ---
-    public const LOGIN_SUCCESS = self::CB_LOGIN_SUCCESS;                         // 0x02
 
     public const CONFIG_KEEP_ALIVE = self::CB_CONFIG_KEEP_ALIVE;                 // 0x03
     public const CONFIG_PING = self::CB_CONFIG_PING;                             // 0x04
@@ -2106,9 +2062,10 @@ final class PlayHandler implements PacketHandler
                 $connection->pendingKeepAliveId = null;
                 return;
 
-            case PacketId::CS_PLAY_POSITION:
-            case PacketId::CS_PLAY_LOOK:
-            case PacketId::CS_PLAY_FLYING: // Position And Rotation (0x1F; CS_PLAY_POSITION_LOOK — алиас)
+            case PacketId::SB_PLAY_MOVE_PLAYER_POS:
+            case PacketId::SB_PLAY_MOVE_PLAYER_ROT:
+            case PacketId::SB_PLAY_MOVE_PLAYER_POS_ROT: // Position And Rotation (0x18)
+            case PacketId::SB_PLAY_MOVE_PLAYER_STATUS_ONLY:
                 // Движение игрока — минимальный сервер принимает молча.
                 return;
 
@@ -2505,7 +2462,7 @@ final class MinecraftServer
             // Перехват Login Plugin Response (0x02) — ответ на fallback-запрос
             // minecraft:brand. В 763 ACK приходит независимо, поэтому здесь
             // только логируем и гасим pending-запрос.
-            if ($connection->state === ProtocolState::Login && $packetId === PacketId::CS_LOGIN_PLUGIN_RESPONSE) {
+            if ($connection->state === ProtocolState::Login && $packetId === PacketId::SB_LOGIN_PLUGIN_RESPONSE) {
                 $connection->pluginRequestState = 'answered';
                 PacketLogger::logInfo("✅ Login Plugin Response (0x02) от клиента $clientId — brand подтверждён");
 
