@@ -629,10 +629,17 @@ final class VarInt
             $value |= ($byte & 0x7F) << $shift;
             $shift += 7;
 
-            if ($shift > 35) {
+            // Исправление прежнего условия `$shift > 35`: VarInt обязан
+            // укладываться в 5 байт (макс. сдвиг 28). На 6-м байте — ошибка.
+            if ($shift > 28) {
                 throw new RuntimeException('VarInt too large');
             }
         } while (($byte & 0x80) !== 0);
+
+        // Java int семантика: знаковое 32-битное значение.
+        if ($value >= 0x80000000) {
+            $value -= 0x100000000;
+        }
 
         return $value;
     }
@@ -660,10 +667,13 @@ final class VarInt
 
 final class StringHandler
 {
+    /** Максимальная длина protocol-строки (UTF-8 байты) — защита от некорректных длин. */
+    public const MAX_LENGTH = 32767;
+
     public static function read(string $buffer, int &$offset): string
     {
         $length = VarInt::read($buffer, $offset);
-        if ($length === null || $length === 0 || $offset + $length > strlen($buffer)) {
+        if ($length === null || $length < 0 || $length > self::MAX_LENGTH || $offset + $length > strlen($buffer)) {
             return '';
         }
 
@@ -1750,6 +1760,13 @@ interface PacketHandler
 
 final class HandshakeHandler implements PacketHandler
 {
+    public function __construct(
+        private readonly ConnectionManager $connections,
+        private readonly PacketFactory $packetFactory,
+        private readonly ServerConfig $config,
+    ) {
+    }
+
     public function handle(ClientConnection $connection, string $packetData): void
     {
         $offset = 0;
@@ -1770,11 +1787,51 @@ final class HandshakeHandler implements PacketHandler
 
         $connection->protocol = (int) ($protocolVersion ?? 0);
 
-        $connection->state = match ($nextState) {
+        // Строгая машина состояний: nextState обязан быть валидным
+        // (1=Status, 2=Login). Ранее произвольное значение молча трактовалось
+        // как Status — клиент в Login мог зависнуть без явной ошибки.
+        $state = match ($nextState) {
             1 => ProtocolState::Status,
             2 => ProtocolState::Login,
-            default => ProtocolState::Status,
+            default => null,
         };
+
+        if ($state === null) {
+            PacketLogger::logError(
+                "❌ Handshake: недопустимый nextState=" . var_export($nextState, true)
+                . " от клиента {$connection->id} — соединение закрывается"
+            );
+            $this->connections->closeConnection($connection->id);
+            return;
+        }
+
+        // Заявленная совместимость проекта: ТОЛЬКО protocol 763 (1.20.1).
+        // Для Login-подключений другая версия отклоняется ЯВНО (в состоянии
+        // Login допустимы только Login Disconnect / Encryption Request /
+        // Login Success / Set Compression / Plugin Request), вместо того чтобы
+        // отправлять несовместимые пакеты и ловить у клиента DecoderException.
+        // Status-запросы (пинг списка серверов) остаёмся вежливыми и отвечаем.
+        if ($state === ProtocolState::Login && $connection->protocol !== $this->config->protocolVersion) {
+            $reason = sprintf(
+                'Неподдерживаемая версия протокола %d. Сервер требует Minecraft 1.20.1 (protocol %d).',
+                $connection->protocol,
+                $this->config->protocolVersion
+            );
+            PacketLogger::logWarning("⚠️ Handshake: {$reason} (клиент {$connection->id}) — отклонено");
+
+            // Состояние переключаем на Login, чтобы ID 0x00 был именно
+            // Login Disconnect (в handshake-состоянии этот же ID — неизвестный пакет).
+            $connection->state = ProtocolState::Login;
+            $this->connections->sendPacket(
+                $connection->id,
+                PacketId::CB_LOGIN_DISCONNECT,
+                $this->packetFactory->createLoginDisconnect($reason)
+            );
+            $this->connections->closeConnection($connection->id);
+            return;
+        }
+
+        $connection->state = $state;
     }
 }
 
@@ -1871,48 +1928,93 @@ final class LoginHandler implements PacketHandler
 
         $username = StringHandler::read($packetData, $offset);
 
-        // Protocol 763 (1.20.1), структура Login Start:
-        //   [Name String][Has Sig Data Boolean][Sig Data?][Optional UUID]
-        // Где Sig Data = [Timestamp Long(8)][Key Length VarInt][Key][Sig Length VarInt][Sig],
-        // а Optional UUID = [Present Boolean][UUID 16 bytes].
-        // Поле "Has UUID" — это Boolean (1 байт), НЕ VarInt-размер строки UUID.
+        // Protocol 763 (1.20.1), структура Login Start (C→S 0x00):
+        //   [Name: String (VarInt len + UTF-8)]
+        //   [Signature Data: OPTIONAL Boolean-present structure]
+        //      present=true → [Timestamp: i64][Key Length: VarInt][Key: byte[]]
+        //                      [Signature Length: VarInt][Signature: byte[]]
+        //   [Truncated Access Token: OPTIONAL Boolean-present, ≤35 bytes]
+        //      present=true → [Token Length: VarInt][Token: byte[]]
+        //
+        // Исправления относительно прежней реализации:
+        //  1) «Optional UUID» в Login Start 763 НЕ существует — ранее код при
+        //     отсутствии подписи считал первые байты хвоста Boolean+UUID и
+        //     смещал курсор (в логах: timestamp=-7004149892657230601,
+        //     pubkey=1517726 bytes, remaining=-1517721). Кадр сам по себе не
+        //     портился (длина кадра ограничивает пакет), но поля читались
+        //     неверно. Теперь необязательные поля разбираются строго с
+        //     проверками границ и только для протоколов, где они есть.
+        //  2) Длины VarInt обязаны помещаться в остаток пакета — иначе это
+        //     битый/несовместимый пакет: соединение закрывается с понятной
+        //     причиной вместо молчаливого повреждения потока.
 
-        // 1. Has Signature Data (Boolean)
+        $total = strlen($packetData);
+        $clientUuid = '';
+
+        // 1. Signature Data (Boolean present) — опционально, есть во всех версиях.
         $hasSigData = false;
-        if ($offset < strlen($packetData)) {
+        if ($offset < $total) {
             $hasSigData = ord($packetData[$offset]) !== 0;
             $offset += 1;
         }
-        PacketLogger::logInfo(sprintf(
-            '🔐 Has Signature Data: %s (клиент %d)',
-            $hasSigData ? 'true' : 'false',
-            $connection->id
-        ));
 
         if ($hasSigData) {
-            // Timestamp (Long, 8 bytes)
+            if ($total - $offset < 8) {
+                $this->disconnectMalformed($connection, 'Login Start: усечённый Timestamp подписи');
+                return;
+            }
             $timestamp = unpack('J', substr($packetData, $offset, 8))[1] ?? 0;
             $offset += 8;
-            // Public Key (String): длина VarInt + данные
-            $pubKeyLen = VarInt::read($packetData, $offset) ?? 0;
+
+            // Public Key: VarInt длина + байты (обязательно в пределах пакета)
+            $pubKeyLen = VarInt::read($packetData, $offset) ?? -1;
+            if ($pubKeyLen < 0 || $pubKeyLen > $total - $offset) {
+                $this->disconnectMalformed($connection, sprintf(
+                    'Login Start: длина public key (%d) выходит за пределы пакета (%d байт осталось)',
+                    $pubKeyLen,
+                    $total - $offset
+                ));
+                return;
+            }
             $offset += $pubKeyLen;
-            // Signature: длина VarInt + данные
-            $sigLen = VarInt::read($packetData, $offset) ?? 0;
+
+            // Signature: VarInt длина + байты
+            $sigLen = VarInt::read($packetData, $offset) ?? -1;
+            if ($sigLen < 0 || $sigLen > $total - $offset) {
+                $this->disconnectMalformed($connection, sprintf(
+                    'Login Start: длина signature (%d) выходит за пределы пакета (%d байт осталось)',
+                    $sigLen,
+                    $total - $offset
+                ));
+                return;
+            }
             $offset += $sigLen;
+
             PacketLogger::logInfo("📅 Sig Data timestamp: $timestamp, pubkey=$pubKeyLen bytes, sig=$sigLen bytes");
         }
 
-        // 2. Optional UUID: Boolean present + 16 bytes UUID
-        $clientUuid = '';
-        $remainingBytes = strlen($packetData) - $offset;
-        PacketLogger::logInfo("📊 Remaining bytes after sig data: $remainingBytes");
-        if ($remainingBytes >= 1) {
-            $hasUuid = ord($packetData[$offset]) !== 0;
-            $offset += 1;
-            if ($hasUuid && strlen($packetData) - $offset >= 16) {
-                $clientUuid = Uuid::pretty(substr($packetData, $offset, 16));
-                $offset += 16;
-                PacketLogger::logInfo("🎯 Client-provided UUID: $clientUuid");
+        // 2. Truncated Access Token — появляется только с protocol 765 (1.20.5+).
+        //    Для 763 любых байтов после подписи быть не должно; лишнее логируем,
+        //    но поток не трогаем (кадр уже ограничен длиной из фрейма).
+        $remainingBytes = $total - $offset;
+        if ($remainingBytes > 0) {
+            if ($connection->protocol >= 765) {
+                $hasToken = ord($packetData[$offset]) !== 0;
+                $offset += 1;
+                if ($hasToken) {
+                    $tokenLen = VarInt::read($packetData, $offset) ?? -1;
+                    if ($tokenLen < 0 || $tokenLen > $total - $offset) {
+                        $this->disconnectMalformed($connection, 'Login Start: усечённый Access Token');
+                        return;
+                    }
+                    $offset += $tokenLen;
+                }
+            } else {
+                PacketLogger::logInfo(sprintf(
+                    '⚠️ Login Start (protocol %d): %d лишних байт после обязательных полей — проигнорированы',
+                    $connection->protocol,
+                    $remainingBytes
+                ));
             }
         }
 
@@ -2004,27 +2106,38 @@ final class LoginHandler implements PacketHandler
         ));
         PacketLogger::logInfo("⏳ Waiting for Login Acknowledged (0x03)... соединение НЕ закрываем, сокет жив");
 
-        // Fallback (ЗАДАЧА 5): если после Login Success клиент так и не прислал
-        // Login Acknowledged (например, ждёт Login Plugin Request для brand),
-        // отправляем minecraft:brand запрос один раз через 2 секунды. Реальный
-        // vanilla-клиент отвечает Plugin Response (0x02) и ACK (0x03); если ACK
-        // уже получен — запрос не отправляется вовсе.
-        if ($connection->protocol >= 763 && $connection->protocol < 764) {
-            $pluginRequest = VarInt::write(1) . StringHandler::write('minecraft:brand')
-                . StringHandler::write('PHP Minecraft Server');
-            $this->connections->scheduleDelayedPacket(
+        // ВАЖНО (протокол 763): минимальный корректный login flow заканчивается
+        // на Login Success; далее сервер ОБЯЗАН только ждать Login Acknowledged
+        // (SB 0x03). Прежний «fallback» планировал отправку Login Plugin Request
+        // (CB 0x04) через 2 секунды — это нарушало протокол:
+        //  - vanilla-клиент 1.20.1 шлёт ACK сразу после Login Success, поэтому
+        //    к моменту срабатывания таймера соединение уже в Play, а случайная
+        //    гонка (ACK в том же TCP-сегменте + порядок тиков цикла) могла
+        //    привести к отправке login-пакета в play-состояние;
+        //  - именно этот пакет (frame len=0x25=37, id=0x04, payload 35 байт)
+        //    вызывал у клиента DecoderException «Packet 0/4 ... found 36 bytes
+        //    extra whilst reading packet 4».
+        // Поэтому отложенная fallback-отправка удалена полностью. Отправлять
+        // Plugin Request можно только как осмысленный ответ на конкретный
+        // запрос клиента, а не «ради проверки соединения».
+    }
+
+    /** Закрытие соединения с понятной причиной (битый/несовместимый пакет). */
+    private function disconnectMalformed(ClientConnection $connection, string $reason): void
+    {
+        PacketLogger::logError("❌ Битый Login Start от клиента {$connection->id}: $reason");
+
+        try {
+            $this->connections->sendPacket(
                 $connection->id,
-                2.0,
-                PacketId::CB_LOGIN_PLUGIN_REQUEST,
-                $pluginRequest,
-                'Login Plugin Request (fallback)',
-                function (ClientConnection $c) use ($pluginRequest): bool {
-                    // Не отправляем, если клиент уже перешёл в Play (ACK получен).
-                    return $c->state === ProtocolState::Login;
-                }
+                PacketId::CB_LOGIN_DISCONNECT,
+                $this->packetFactory->createLoginDisconnect($reason)
             );
-            $connection->pluginRequestState = 'scheduled';
+        } catch (Throwable) {
+            // Сокет мог уже умереть — всё равно закрываем ниже.
         }
+
+        $this->connections->closeConnection($connection->id);
     }
 }
 
@@ -2164,7 +2277,10 @@ final class MinecraftServer
         $this->connectionManager = new ConnectionManager($this);
         $this->packetDispatcher = new PacketDispatcher();
 
-        $this->packetDispatcher->registerHandler(ProtocolState::Handshake, new HandshakeHandler());
+        $this->packetDispatcher->registerHandler(
+            ProtocolState::Handshake,
+            new HandshakeHandler($this->connectionManager, $this->packetFactory, $config)
+        );
         $this->packetDispatcher->registerHandler(
             ProtocolState::Status,
             new StatusHandler($this->connectionManager, $this->packetFactory)
@@ -2282,19 +2398,19 @@ final class MinecraftServer
         $props = VarInt::write(0);
         $payload = $uuid . $username . $props;
 
-        // Побайтный эталон Protocol 763:
-        //   data    = UUID(16) + len(0x0a) + "turel1983"(9) + props(0x00) = 28 байт
-        //   frame   = len(0x1d) + id(0x02) + data = 30 байт
-        // (В эталонной строке пользователя из задачи длина строки была
-        // записана как 0x09 — это опечатка: 'turel1983' = 9 символов,
-        //  но корректный VarInt-префикс строки = 0x09 только для 9 байт;
-        //  сверка ведётся по фактической длине имени.)
+        // Побайтный эталон Protocol 763 (ровно как наблюдает клиент):
+        //   data  = UUID(16) + len(0x09) + "turel1983"(9) + props(0x00) = 27 байт
+        //   frame = len(0x1c=28, включает packet ID) + id(0x02) + data = 29 байт
+        // (В прежней редакции эталон ошибочно ожидал длину имени 0x0a и кадр
+        // 30 байт — расхождение с реальным wire format.)
         $expectedDataHex = '9ecc42c83e934cf79ed15c4c22f67ac7' . '09' . bin2hex('turel1983') . '00';
         $expectedFrame = PacketCodec::wrapPacket(0x02, hex2bin($expectedDataHex));
 
         $check(strlen($payload) === strlen($uuid) + 1 + strlen('turel1983') + 1, 'Login Success payload layout');
         $check(bin2hex($payload) === $expectedDataHex, 'Login Success data hex mismatch: ' . bin2hex($payload));
         $check(bin2hex($actual = PacketCodec::wrapPacket(0x02, $payload)) === bin2hex($expectedFrame), 'Login Success frame mismatch');
+        $check(strlen($expectedFrame) === 29, 'Login Success frame = 29 bytes (VarInt len 1 + payload 28)');
+        $check($expectedFrame[0] === "\x1c" && $expectedFrame[1] === "\x02", 'Кадр начинается с 0x1C 0x02 (длина 28, ID 0x02)');
         $check(strlen($expectedFrame) === strlen($payload) + 2, 'Login Success frame = data + 2 header bytes');
 
         // Проверка, что реальный factory produces ровно эту структуру.
@@ -2795,13 +2911,15 @@ final class MinecraftServer
 }
 
 // ============================================================================
-// Запуск
+// Запуск (пропускается, если файл загружен из тестов: MC_SERVER_NO_AUTOSTART)
 // ============================================================================
 
 if (!extension_loaded('json')) {
     PacketLogger::logError('Расширение json не загружено. Требуется для работы сервера.');
     exit(1);
 }
+
+if (!defined('MC_SERVER_NO_AUTOSTART')) {
 
 if (strtoupper(substr(PHP_OS, 0, 3)) !== 'WIN' && function_exists('pcntl_signal')) {
     declare(ticks=1);
@@ -2822,4 +2940,5 @@ try {
 } catch (Throwable $e) {
     PacketLogger::logError('Ошибка: ' . $e->getMessage());
     exit(1);
+}
 }
