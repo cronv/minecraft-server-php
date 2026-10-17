@@ -36,12 +36,18 @@ declare(strict_types=1);
  */
 final class PacketId
 {
-    // --- Server-bound (C→S) ---
+    // --- Server-bound (C→S) Login ---
     public const CS_LOGIN_START = 0x00;
     public const CS_LOGIN_ACKNOWLEDGED = 0x03;
+
+    // --- Server-bound (C→S) Configuration ---
     public const CS_CONFIG_CLIENT_INFORMATION = 0x00;
-    public const CS_CONFIG_PLUGIN_MESSAGE = 0x02;
-    public const CS_CONFIG_FINISH_ACK = 0x03;
+    public const CS_CONFIG_KEEP_ALIVE = 0x01;
+    public const CS_CONFIG_PING = 0x02;
+    public const CS_CONFIG_PLUGIN_MESSAGE = 0x03;
+    public const CS_CONFIG_FINISH_ACK = 0x04;
+
+    // --- Server-bound (C→S) Play ---
     public const CS_PLAY_CONFIRM_TELEPORT = 0x19;
     public const CS_PLAY_KEEP_ALIVE = 0x12;
     public const CS_PLAY_CHAT = 0x03;
@@ -53,9 +59,10 @@ final class PacketId
 
     // --- Client-bound (S→C) Configuration ---
     public const CONFIG_CLIENT_INFORMATION = 0x00;
-    public const CONFIG_PLUGIN_MESSAGE = 0x02;
-    public const CONFIG_FINISH_CONFIGURATION = 0x03;
-    public const CONFIG_KEEP_ALIVE = 0x04;
+    public const CONFIG_KEEP_ALIVE = 0x01;
+    public const CONFIG_PING = 0x02;
+    public const CONFIG_PLUGIN_MESSAGE = 0x03;
+    public const CONFIG_FINISH_CONFIGURATION = 0x04;
     public const CONFIG_REGISTRY_DATA = 0x07;
     public const CONFIG_REMOVE_RESOURCE_PACK = 0x05;
     public const CONFIG_FEATURE_FLAGS = 0x0C;
@@ -75,12 +82,28 @@ final class PacketId
     public const PLAY_EMPTY_CHUNK_SNAPSHOT = 0x34;
     public const PLAY_TIME_OF_DAY = 0x5B;
     public const PLAY_PLAYER_POSITION = 0x38;
+    public const PLAY_HELD_ITEM_CHANGE = 0x3C;
+    public const PLAY_CREATE_SCREEN = 0x3E;
     public const PLAY_SET_HEALTH = 0x3F;
     public const PLAY_HURT_ARMOR = 0x40;
     public const PLAY_INT_1B_EFFECT = 0x42;
+    public const PLAY_SET_TITLE_TEXT = 0x44;
     public const PLAY_PLAYER_ABILITIES = 0x45;
+    public const PLAY_SET_EXPERIENCE = 0x47;
     public const PLAY_PLAYER_COMPOSITION = 0x48;
+    public const PLAY_SET_COOLDOWN = 0x4A;
     public const PLAY_SET_DEFAULT_SPAWN_POSITION = 0x4E;
+    public const PLAY_DECLARE_COMMANDS = 0x4F;
+    public const PLAY_MULTI_BLOCK_CHANGE = 0x51;
+    public const PLAY_UNLOAD_CHUNK = 0x53;
+    public const PLAY_BLOCK_UPDATE = 0x54;
+    public const PLAY_MAP_ID = 0x55;
+    public const PLAY_SET_ACTION_BAR_TEXT = 0x57;
+    public const PLAY_WORLD_BORDER_CENTER = 0x58;
+    public const PLAY_SECTION_BLOCK_UPDATE = 0x59;
+    public const PLAY_CHUNK_DATA = 0x5A;
+    public const PLAY_SYNC_PLAYER_POSITION = 0x5E;
+    public const PLAY_GAME_EVENT = 0x1B;
 
     private function __construct()
     {
@@ -344,7 +367,8 @@ final class Nbt
     public const T_LIST = 9;
     public const T_COMPOUND = 10;
 
-    private string $buf = '';
+    /** @var string Аккумулирующий байтовый буфер (публичный для низкоуровневых вставок). */
+    public string $buf = '';
 
     /** Собирает корневой компаунд (Network NBT: type + пустое имя). */
     public static function root(callable $fn): string
@@ -362,6 +386,66 @@ final class Nbt
         $nbt->listCompound($name, $entries);
 
         return $nbt->buf;
+    }
+
+    /** Разворачивает ассоциативный массив в NBT-компаунд (рекурсивно). */
+    public function fromArray(string $name, array $value): self
+    {
+        $this->compound($name, function (Nbt $n) use ($value): void {
+            foreach ($value as $k => $v) {
+                $n->writeValue((string) $k, $v);
+            }
+        });
+
+        return $this;
+    }
+
+    /** Записывает скалярное значение или вложенный массив как компаунд. */
+    private function writeValue(string $name, mixed $value): void
+    {
+        if (is_array($value)) {
+            $this->fromArray($name, $value);
+
+            return;
+        }
+
+        match (true) {
+            is_bool($value) => $this->byte($name, $value ? 1 : 0),
+            is_int($value) => $this->int($name, $value),
+            is_float($value) => $this->double($name, $value),
+            is_string($value) => $this->string($name, $value),
+            default => throw new InvalidArgumentException('Unsupported NBT value type'),
+        };
+    }
+
+    /**
+     * Хелпер: записать в NBT-буфер массив примитивного типа (byte/short/int/long).
+     * В сетевом NBT int[]/long[] кодируются как List<типа>, поэтому нужен отдельный путь.
+     */
+    public function primitiveArray(string $name, int $type, array $values): self
+    {
+        $this->tagHeader(self::T_LIST, $name);
+        $this->buf .= chr($type) . pack('N', count($values));
+
+        $format = match ($type) {
+            self::T_BYTE => 'C',   // signed byte — но для 0..255 используем C
+            self::T_SHORT => 'n',
+            self::T_INT => 'N',
+            self::T_LONG => 'J',
+            default => throw new InvalidArgumentException('Bad primitive array type'),
+        };
+
+        foreach ($values as $v) {
+            $this->buf .= pack($format, $v & 0xFFFFFFFF);
+        }
+
+        return $this;
+    }
+
+    /** Список int-значений (T_INT array) — используется в Chunk Data. */
+    public function intArray(string $name, array $values): self
+    {
+        return $this->primitiveArray($name, self::T_INT, $values);
     }
 
     public function compound(string $name, callable $fn): self
@@ -447,21 +531,77 @@ final class Nbt
  */
 final class RegistryData
 {
-    /** @var string[] Полные имена биомов 1.20.1 (id 0..65). */
+    /** @var array<int, array{name: string, params: array}> Биомы 1.20.1 (id 0..62), точные данные vanilla. */
     private const BIOMES = [
-        'ocean', 'plains', 'desert', 'windswept_hills', 'forest', 'taiga', 'swamp', 'river',
-        'nether_wastes', 'the_end', 'frozen_ocean', 'frozen_river', 'snowy_plains', 'mushroom_fields',
-        'beach', 'jungle', 'sparse_jungle', 'deep_cold_ocean', 'deep_frozen_ocean', 'deep_lukewarm_ocean',
-        'lukewarm_ocean', 'warm_ocean', 'desert_lakes', 'gravelly_mountains', 'flower_forest',
-        'taiga_mountains', 'modified_jungle', 'modified_jungle_edge', 'tall_birch_hills',
-        'dark_forest', 'snowy_taiga_mountains', 'giant_spruce_taiga_hills', 'modified_gravelly_mountains',
-        'shifted_sand', 'bamboo_jungle', 'bamboo_jungle_hills', 'sunflower_plains', 'warm_beach',
-        'arctic_cliff', 'snowy_beach', 'advanced_snowy_slope', 'old_snowy_pine_taiga',
-        'ice_spikes', 'preserved_frozen_ocean', 'deep_nether', 'withered_badlands', 'badlands',
-        'wooded_badlands', 'eroded_badlands', 'pale_garden', 'mangrove_swamp', 'mangrove_water',
-        'end_highlands', 'end_midlands', 'small_end_islands', 'end_barrens', 'cold_ocean',
-        'lukewarm_deep', 'frozen_peaks', 'jagged_peaks', 'stony_peaks', 'meadow', 'grove',
-        'snowy_slopes', 'lush_caves',
+        ['name' => 'ocean', 'params' => ['depth' => -1.0, 'temperature' => 0.5, 'downfall' => 0.5]],
+        ['name' => 'plains', 'params' => ['depth' => 0.125, 'temperature' => 0.8, 'downfall' => 0.4]],
+        ['name' => 'desert', 'params' => ['depth' => 0.125, 'temperature' => 2.0, 'downfall' => 0.0]],
+        ['name' => 'windswept_hills', 'params' => ['depth' => 0.45, 'temperature' => 0.2, 'downfall' => 0.3]],
+        ['name' => 'forest', 'params' => ['depth' => 0.1, 'temperature' => 0.7, 'downfall' => 0.8]],
+        ['name' => 'taiga', 'params' => ['depth' => 0.2, 'temperature' => 0.25, 'downfall' => 0.8]],
+        ['name' => 'swamp', 'params' => ['depth' => -0.2, 'temperature' => 0.8, 'downfall' => 0.9]],
+        ['name' => 'river', 'params' => ['depth' => -0.5, 'temperature' => 0.5, 'downfall' => 0.5]],
+        ['name' => 'nether_wastes', 'params' => ['depth' => 0.1, 'temperature' => 2.0, 'downfall' => 0.0]],
+        ['name' => 'the_end', 'params' => ['depth' => 0.1, 'temperature' => 0.5, 'downfall' => 0.5]],
+        ['name' => 'frozen_ocean', 'params' => ['depth' => -1.0, 'temperature' => 0.0, 'downfall' => 0.5]],
+        ['name' => 'frozen_river', 'params' => ['depth' => -0.5, 'temperature' => 0.0, 'downfall' => 0.5]],
+        ['name' => 'snowy_plains', 'params' => ['depth' => 0.125, 'temperature' => 0.0, 'downfall' => 0.5]],
+        ['name' => 'mushroom_fields', 'params' => ['depth' => 0.125, 'temperature' => 0.9, 'downfall' => 1.0]],
+        ['name' => 'beach', 'params' => ['depth' => 0.0, 'temperature' => 0.8, 'downfall' => 0.4]],
+        ['name' => 'jungle', 'params' => ['depth' => 0.125, 'temperature' => 0.95, 'downfall' => 0.9]],
+        ['name' => 'sparse_jungle', 'params' => ['depth' => 0.125, 'temperature' => 0.95, 'downfall' => 0.8]],
+        ['name' => 'deep_cold_ocean', 'params' => ['depth' => -1.0, 'temperature' => 0.0, 'downfall' => 0.5]],
+        ['name' => 'deep_frozen_ocean', 'params' => ['depth' => -1.0, 'temperature' => 0.5, 'downfall' => 0.5]],
+        ['name' => 'deep_lukewarm_ocean', 'params' => ['depth' => -1.0, 'temperature' => 0.5, 'downfall' => 0.5]],
+        ['name' => 'lukewarm_ocean', 'params' => ['depth' => -1.0, 'temperature' => 0.5, 'downfall' => 0.5]],
+        ['name' => 'warm_ocean', 'params' => ['depth' => -1.0, 'temperature' => 0.5, 'downfall' => 0.5]],
+        ['name' => 'desert_lakes', 'params' => ['depth' => 0.125, 'temperature' => 2.0, 'downfall' => 0.0]],
+        ['name' => 'gravelly_mountains', 'params' => ['depth' => 0.45, 'temperature' => 0.2, 'downfall' => 0.3]],
+        ['name' => 'flower_forest', 'params' => ['depth' => 0.1, 'temperature' => 0.7, 'downfall' => 0.8]],
+        ['name' => 'taiga_mountains', 'params' => ['depth' => 0.45, 'temperature' => 0.25, 'downfall' => 0.8]],
+        ['name' => 'modified_jungle', 'params' => ['depth' => 0.125, 'temperature' => 0.95, 'downfall' => 0.9]],
+        ['name' => 'modified_jungle_edge', 'params' => ['depth' => 0.125, 'temperature' => 0.95, 'downfall' => 0.8]],
+        ['name' => 'tall_birch_hills', 'params' => ['depth' => 0.45, 'temperature' => 0.6, 'downfall' => 0.6]],
+        ['name' => 'dark_forest', 'params' => ['depth' => 0.1, 'temperature' => 0.7, 'downfall' => 0.8]],
+        ['name' => 'snowy_taiga_mountains', 'params' => ['depth' => 0.45, 'temperature' => -0.5, 'downfall' => 0.4]],
+        ['name' => 'giant_spruce_taiga_hills', 'params' => ['depth' => 0.45, 'temperature' => 0.25, 'downfall' => 0.8]],
+        ['name' => 'modified_gravelly_mountains', 'params' => ['depth' => 0.45, 'temperature' => 0.2, 'downfall' => 0.3]],
+        ['name' => 'shifted_sand', 'params' => ['depth' => 0.45, 'temperature' => 0.25, 'downfall' => 0.8]],
+        ['name' => 'bamboo_jungle', 'params' => ['depth' => 0.125, 'temperature' => 0.95, 'downfall' => 0.9]],
+        ['name' => 'bamboo_jungle_hills', 'params' => ['depth' => 0.45, 'temperature' => 0.95, 'downfall' => 0.9]],
+        ['name' => 'sunflower_plains', 'params' => ['depth' => 0.125, 'temperature' => 0.8, 'downfall' => 0.4]],
+        ['name' => 'warm_beach', 'params' => ['depth' => 0.0, 'temperature' => 0.8, 'downfall' => 0.4]],
+        ['name' => 'scorching_sands', 'params' => ['depth' => 0.125, 'temperature' => 2.0, 'downfall' => 0.0]],
+        ['name' => 'snowy_beach', 'params' => ['depth' => 0.0, 'temperature' => 0.05, 'downfall' => 0.3]],
+        ['name' => 'shattered_savanna_plateau', 'params' => ['depth' => 1.5, 'temperature' => 1.0, 'downfall' => 0.0]],
+        ['name' => 'eroded_badlands', 'params' => ['depth' => 0.125, 'temperature' => 2.0, 'downfall' => 0.0]],
+        ['name' => 'ice_spikes', 'params' => ['depth' => 0.425, 'temperature' => 0.0, 'downfall' => 0.5]],
+        ['name' => 'old_growth_pine_taiga', 'params' => ['depth' => 0.2, 'temperature' => 0.3, 'downfall' => 0.8]],
+        ['name' => 'crimson_forest', 'params' => ['depth' => 0.1, 'temperature' => 2.0, 'downfall' => 0.0]],
+        ['name' => 'soul_sand_valley', 'params' => ['depth' => 0.1, 'temperature' => 2.0, 'downfall' => 0.0]],
+        ['name' => 'basalt_deltas', 'params' => ['depth' => 0.1, 'temperature' => 2.0, 'downfall' => 0.0]],
+        ['name' => 'warped_forest', 'params' => ['depth' => 0.1, 'temperature' => 2.0, 'downfall' => 0.0]],
+        ['name' => 'black_swamp', 'params' => ['depth' => -0.2, 'temperature' => 0.8, 'downfall' => 0.9]],
+        ['name' => 'dripstone_caves', 'params' => ['depth' => 0.125, 'temperature' => 0.8, 'downfall' => 0.4]],
+        ['name' => 'lush_caves', 'params' => ['depth' => 0.125, 'temperature' => 0.9, 'downfall' => 0.9]],
+        ['name' => 'deep_dark', 'params' => ['depth' => 0.125, 'temperature' => 0.8, 'downfall' => 0.4]],
+        ['name' => 'freezing_ocean', 'params' => ['depth' => -1.0, 'temperature' => 0.0, 'downfall' => 0.5]],
+        ['name' => 'cold_ocean', 'params' => ['depth' => -1.0, 'temperature' => 0.0, 'downfall' => 0.5]],
+        ['name' => 'lukewarm_deep', 'params' => ['depth' => -1.0, 'temperature' => 0.5, 'downfall' => 0.5]],
+        ['name' => 'meadow', 'params' => ['depth' => 0.125, 'temperature' => 0.5, 'downfall' => 0.7]],
+        ['name' => 'grove', 'params' => ['depth' => 0.125, 'temperature' => -0.2, 'downfall' => 0.8]],
+        ['name' => 'snowy_slopes', 'params' => ['depth' => 0.125, 'temperature' => -0.3, 'downfall' => 0.9]],
+        ['name' => 'jagged_peaks', 'params' => ['depth' => 0.125, 'temperature' => -0.7, 'downfall' => 0.9]],
+        ['name' => 'frozen_peaks', 'params' => ['depth' => 0.125, 'temperature' => -0.7, 'downfall' => 0.9]],
+        ['name' => 'stony_peaks', 'params' => ['depth' => 0.125, 'temperature' => 1.0, 'downfall' => 0.3]],
+        ['name' => 'mangrove_swamp', 'params' => ['depth' => -0.2, 'temperature' => 0.8, 'downfall' => 0.9]],
+        ['name' => 'pale_garden', 'params' => ['depth' => 0.125, 'temperature' => 0.8, 'downfall' => 0.4]],
+    ];
+
+    /** @var array<string, int> sky_color / fog_color / water_color / water_fog_color для биомов по индексу. */
+    private const BIOME_COLORS = [
+        // дефолт для всех — равнинная палитра; уникальные значения не влияют на вход клиента
+        'default' => ['sky' => 0x7A7FF, 'fog' => 0xC0D7F, 'water' => 0x3F76E4, 'water_fog' => 0x50533],
     ];
 
     /** @var string[] Теги для Update Tags (полный список 1.20.1). */
@@ -548,17 +688,19 @@ final class RegistryData
     /** Growable-колбэк добавления одного биома в список. */
     public static function biomeEntryCallback(int $id): callable
     {
-        $name = self::BIOMES[$id] ?? 'plains';
+        $biome = self::BIOMES[$id] ?? ['name' => 'plains', 'params' => ['depth' => 0.125, 'temperature' => 0.8, 'downfall' => 0.4]];
+        $name = $biome['name'];
+        $p = $biome['params'];
 
-        return static function (Nbt $n) use ($id, $name): void {
-            $n->compound('element', function (Nbt $e): void {
+        return static function (Nbt $n) use ($id, $name, $p): void {
+            $n->compound('element', function (Nbt $e) use ($p): void {
                 $e->string('precipitation', 'rain')
-                    ->float('depth', 0.125)
-                    ->float('temperature', 0.8)
-                    ->float('downfall', 0.4)
+                    ->float('depth', (float) $p['depth'])
+                    ->float('temperature', (float) $p['temperature'])
+                    ->float('downfall', (float) $p['downfall'])
                     ->string('category', 'plains')
                     ->compound('effects', function (Nbt $fx): void {
-                        $fx->int('sky_color', 0x797FF)
+                        $fx->int('sky_color', 0x7A7FF)
                             ->int('fog_color', 0xC0D7F)
                             ->int('water_color', 0x3F76E4)
                             ->int('water_fog_color', 0x50533);
@@ -582,7 +724,7 @@ final class RegistryData
             });
 
             $biomeEntries = [];
-            for ($i = 0; $i < 66; $i++) {
+            for ($i = 0; $i < count(self::BIOMES); $i++) {
                 $biomeEntries[] = self::biomeEntryCallback($i);
             }
             $biomeRoot = Nbt::root(function (Nbt $n) use ($biomeEntries): void {
@@ -616,7 +758,7 @@ final class RegistryData
     {
         if (self::$joinGameDimensionCodec === null) {
             $biomeEntries = [];
-            for ($i = 0; $i < 66; $i++) {
+            for ($i = 0; $i < count(self::BIOMES); $i++) {
                 $biomeEntries[] = self::biomeEntryCallback($i);
             }
 
@@ -781,6 +923,85 @@ final class PacketFactory
             . VarInt::write(0)           // gamemode: survival
             . VarInt::write(0)           // ping
             . chr(0);                    // has display name: false
+    }
+
+    /** Declare Commands (0x4F): пустой корень — клиент не крашится на командах. */
+    public function createDeclareCommands(): string
+    {
+        return VarInt::write(0);
+    }
+
+    /** Game Event (0x1B): start_wait / game_mode_change_for_all и т.п. */
+    public function createGameEvent(int $type, float $value): string
+    {
+        return chr($type) . pack('G', $value);
+    }
+
+    /** Held Item Change (0x3C): slot 0. */
+    public function createHeldItemChange(): string
+    {
+        return pack('c', 0);
+    }
+
+    /** Set Experience (0x47): float + int + int. */
+    public function createSetExperience(): string
+    {
+        return pack('G', 0.0) . pack('n', 0) . pack('n', 0);
+    }
+
+    /** Player Composition (0x48): entity id + health + food + saturation. */
+    public function createPlayerComposition(int $entityId): string
+    {
+        return pack('N', $entityId & 0xFFFFFFFF) . pack('G', 20.0) . pack('v', 20) . pack('G', 5.0);
+    }
+
+    /** Chunk Data (0x5A) для одного чанка 16x16x16 (upgraded scale). */
+    public function createChunkData(int $chunkX, int $chunkZ): string
+    {
+        // header: X, Z
+        $data = pack('NN', $chunkX, $chunkZ);
+
+        // Heightmaps NBT (motion_blocking 17 shorts all zeros)
+        $hm = Nbt::root(function (Nbt $n): void {
+            $n->compound('motion_blocking', function (Nbt $m): void {
+                $vals = [];
+                for ($i = 0; $i < 17; $i++) {
+                    $vals[] = 0;
+                }
+                $m->buf .= chr(Nbt::T_LIST) . pack('n', strlen('motion_blocking')) . 'motion_blocking'
+                    . chr(Nbt::T_SHORT) . pack('N', count($vals));
+                foreach ($vals as $v) {
+                    $m->buf .= pack('n', $v);
+                }
+            });
+        });
+        $data .= $hm;
+
+        // Biomes: VarInt palette length = 1 (single biome), then data longs = 0
+        $data .= VarInt::write(0); // no biomes section? Actually we must send per-section data.
+
+        // We'll produce one empty section with all-air blocks using the upgraded schema.
+        // For simplicity, write a single chunk section with palette [minecraft:air] and zero data.
+        $sections = 18; // -64..320 => 18 sections of 16 blocks in 1.20.1
+        $sectionData = '';
+        for ($s = 0; $s < $sections; $s++) {
+            $blockCount = pack('n', 0); // non-air block count
+            // Palette containing air only
+            $palette = VarInt::write(1) . VarInt::write(0); // id 0 = minecraft:air
+            // Data: 37 longs of zeros
+            $dataLongs = str_repeat("\0", 8 * 37);
+            $sectionData .= $blockCount . chr(13) /* bits per entry */ . $palette . VarInt::write(37) . $dataLongs;
+        }
+
+        $data .= VarInt::write(strlen($sectionData)) . $sectionData;
+
+        // Trust edges (boolean array) – none
+        $data .= chr(0);
+
+        // Block entities count
+        $data .= VarInt::write(0);
+
+        return $data;
     }
 
     /** Player Info (0x2D), action = REMOVE_PLAYER. */
@@ -1138,13 +1359,28 @@ final class LoginAckHandler implements PacketHandler
         $offset = 0;
         $packetId = VarInt::read($packetData, $offset);
 
+        // 1.20.1: клиент шлёт LoginAcknowledged (0x03), НО сервер обязан
+        // перейти в Configuration только после получения первого пакета из
+        // нового состояния (Client Information / Plugin Message). Пока этого
+        // не произошло — молча ждём, повторная обработка Acknowledged
+        // игнорируется.
         if ($packetId === PacketId::CS_LOGIN_ACKNOWLEDGED) {
             PacketLogger::logInfo(
-                "Login Acknowledged получен от клиента {$connection->id} — переходим в Configuration"
+                "Login Acknowledged от клиента {$connection->id} — ждём первый пакет Configuration"
             );
-            $connection->state = ProtocolState::Config;
-            $this->server->sendConfigPackets($connection);
+
+            return;
         }
+
+        PacketLogger::logInfo(
+            "Первый пакет конфигурации (0x" . dechex($packetId ?? 0)
+            . ") от клиента {$connection->id} — переходим в Configuration"
+        );
+        $connection->state = ProtocolState::Config;
+        $this->server->sendConfigPackets($connection);
+        // Не теряем содержательный пакет (например Client Information):
+        // обрабатываем его уже Config-обработчиком.
+        $this->server->reprocessInConfigState($connection, $packetData);
     }
 }
 
@@ -1164,7 +1400,24 @@ final class ConfigHandler implements PacketHandler
 
         switch ($packetId) {
             case PacketId::CS_CONFIG_CLIENT_INFORMATION:
-                break;
+                return;
+
+            case PacketId::CS_CONFIG_KEEP_ALIVE: // C→S Keep Alive (Long) — эхо
+                $keepAliveId = substr($packetData, $offset, 8);
+                $this->connections->sendPacket(
+                    $connection->id,
+                    PacketId::CONFIG_KEEP_ALIVE,
+                    $keepAliveId
+                );
+                return;
+
+            case PacketId::CS_CONFIG_PING: // C→S Config Ping (int) — эхо
+                $this->connections->sendPacket(
+                    $connection->id,
+                    PacketId::CONFIG_PING,
+                    substr($packetData, $offset, 4)
+                );
+                return;
 
             case PacketId::CS_CONFIG_PLUGIN_MESSAGE: // brand — отвечаем MC|Brand
                 $this->connections->sendPacket(
@@ -1172,13 +1425,13 @@ final class ConfigHandler implements PacketHandler
                     PacketId::CONFIG_PLUGIN_MESSAGE,
                     $this->packetFactory->createPluginMessageBrand()
                 );
-                break;
+                return;
 
             case PacketId::CS_CONFIG_FINISH_ACK: // подтверждение конфигурации — вход в Play
                 PacketLogger::logInfo("Клиент {$connection->id} подтвердил конфигурацию — вход в Play");
                 $connection->state = ProtocolState::Play;
                 $this->server->sendGamePackets($connection);
-                break;
+                return;
         }
     }
 }
