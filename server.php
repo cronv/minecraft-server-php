@@ -132,14 +132,41 @@ class StringHandler {
 }
 
 class UUIDGenerator {
+    /**
+     * Детерминированный offline-UUID (как в vanilla Minecraft: MD5 "OfflinePlayer:" + name, версия 3).
+     */
+    public static function generateOffline(string $username): string {
+        $md5 = md5('OfflinePlayer:' . $username);
+        // Версия 3
+        $md5[12] = '3';
+        // Variant RFC4122
+        $v = hexdec($md5[16]);
+        $v = ($v & 0xB) | 0x8;
+        $md5[16] = dechex($v);
+        return sprintf('%s-%s-%s-%s-%s',
+            substr($md5, 0, 8),
+            substr($md5, 8, 4),
+            substr($md5, 12, 4),
+            substr($md5, 16, 4),
+            substr($md5, 20, 12)
+        );
+    }
+
     public static function generate(string $username): string {
-        return sprintf(
-            '%04x%04x-%04x-%04x-%04x-%012x',
-            mt_rand(0, 0xffff), mt_rand(0, 0xffff),
-            mt_rand(0, 0xffff),
-            mt_rand(0, 0x0fff) | 0x4000,
-            mt_rand(0, 0x3fff) | 0x8000,
-            crc32($username . time())
+        return self::generateOffline($username);
+    }
+
+    /**
+     * Конвертация 16 сырых байт UUID в канонический строковый формат.
+     */
+    public static function fromBytes(string $bytes): string {
+        $hex = bin2hex($bytes);
+        return sprintf('%s-%s-%s-%s-%s',
+            substr($hex, 0, 8),
+            substr($hex, 8, 4),
+            substr($hex, 12, 4),
+            substr($hex, 16, 4),
+            substr($hex, 20, 12)
         );
     }
 
@@ -260,27 +287,34 @@ class WorldGenerator {
         $chunkData .= pack('N', 0); // Chunk X
         $chunkData .= pack('N', 0); // Chunk Z
 
-        // Full chunk flag
-        $chunkData .= pack('c', 1);
+        // Heightmaps (NBT TAG_Compound, big-endian)
+        // Пол — grass_block на y=64 => индекс в long-массиве: (64 - (-64)) + 1 = 129 -> long[2], bit 1
+        $heightmapLongs = [0, 0, 2, 0]; // 4 longs покрывают индексы 0..255
+        $mkLongArray = function (array $longs): string {
+            $s = pack('c', 10);              // element type = TAG_Long
+            $s .= pack('N', count($longs));  // count
+            foreach ($longs as $l) {
+                $s .= pack('J', $l);         // TAG_Long (8 bytes, big-endian)
+            }
+            return $s;
+        };
+        $hm  = "\x0a";                       // root TAG_Compound
+        $hm .= "\x00\x0e";                   // name "MOTION_BLOCKING" (len 14)
+        $hm .= 'MOTION_BLOCKING';
+        $hm .= $mkLongArray($heightmapLongs);
+        $hm .= "\x00\x0d";                   // name "WORLD_SURFACE" (len 13)
+        $hm .= 'WORLD_SURFACE';
+        $hm .= $mkLongArray($heightmapLongs);
+        $hm .= "\x00";                       // end root compound
+        $chunkData .= $hm;
 
-        // Heightmaps
-        $heightmaps = [
-            'MOTION_BLOCKING' => ['0' => []],
-            'WORLD_SURFACE' => ['0' => []]
-        ];
-        $heightmapsJson = json_encode($heightmaps, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-        $chunkData .= StringHandler::write($heightmapsJson);
-
-        // Biomes (1024 entries)
-        $chunkData .= VarInt::write(1024);
-        for ($i = 0; $i < 1024; $i++) {
-            $chunkData .= VarInt::write(1); // Plains biome
-        }
-
-        // Chunk sections
+        // Chunk sections (with biome palettes inside each section)
         $chunkData .= self::generateChunkSections();
 
         // Block entities count
+        $chunkData .= VarInt::write(0);
+
+        // 1.20.1: Tailer data (light trust / middle bits) — пусто
         $chunkData .= VarInt::write(0);
 
         return $chunkData;
@@ -289,37 +323,53 @@ class WorldGenerator {
     private static function generateChunkSections(): string {
         $sections = '';
 
-        // Sections count
-        $sections .= VarInt::write(1); // One section
+        // Sections count — 19 секций по 16 блоков (y=-64..255), обязательное поле
+        $sections .= VarInt::write(19);
 
-        // Section Y position
-        $sections .= VarInt::write(0);
+        // Заполняем нижнюю половину (секции 0..7, y=-64..63) камнем,
+        // секцию 8 (y=64..79) — травой (grass_block), выше — воздух (пустые секции).
+        for ($i = 0; $i < 19; $i++) {
+            if ($i <= 8) {
+                $sections .= "\x01"; // is not empty
 
-        // Block states palette size
-        $sections .= VarInt::write(2); // 2 block types: air and stone
+                $blockName = ($i === 8) ? 'minecraft:grass_block' : 'minecraft:stone';
 
-        // Palette entries
-        $sections .= StringHandler::write("minecraft:air");
-        $sections .= StringHandler::write("minecraft:stone");
+                // Palette + block data
+                $sections .= self::writeSectionData($blockName);
 
-        // Block states data
-        $sections .= VarInt::write(1); // Bits per block
-        $sections .= VarInt::write(1024); // Data array length
+                // Biome palette + data (single-value palette, 0 bits per entry)
+                $sections .= VarInt::write(1);                 // palette size
+                $sections .= VarInt::write(1);                 // biome id: plains
+                $sections .= VarInt::write(0);                 // bits per entry
+                $sections .= VarInt::write(0);                 // data array length = 0
 
-        // Block data (all air)
-        $sections .= str_repeat("\x00", 512); // 1024 bits = 512 bytes
+                // Block light: 2048 bytes (VarInt len + data)
+                $dark = str_repeat("\x00", 2048);
+                $sections .= VarInt::write(strlen($dark)) . $dark;
 
-        // Biomes data
-        $sections .= VarInt::write(0); // Bits per biome
-        $sections .= VarInt::write(0); // Data array length
-
-        // Block light
-        $sections .= "\x00";
-
-        // Sky light
-        $sections .= "\x00";
+                // Sky light: все 15 (0xff)
+                $bright = str_repeat("\xff", 2048);
+                $sections .= VarInt::write(strlen($bright)) . $bright;
+            } else {
+                $sections .= "\x00"; // empty section (воздух)
+            }
+        }
 
         return $sections;
+    }
+
+    private static function writeSectionData(string $blockName): string {
+        $out = '';
+
+        // Палитра из одного блока: клиент НЕ читает имена палитры при single-value
+        $out .= VarInt::write(1);                       // palette size = 1
+        $out .= VarInt::write(0);                       // block state id (air/stone/grass_block = id 0 в vanilla-палитре)
+
+        // Для single-value палитры: bits per block = 0, data array length = 0
+        $out .= VarInt::write(0);                       // bits per entry (0)
+        $out .= VarInt::write(0);                       // data array length
+
+        return $out;
     }
 }
 
@@ -336,6 +386,13 @@ class PacketFactory {
         // Entity ID (int, 32-bit, big-endian)
         $data .= pack('N', 1); // 1 = player entity ID
 
+        // Player Info (UUID as 16 raw bytes) — требуется в 1.19.3+ (включая 1.20.1)
+        if ($uuid !== '') {
+            $data .= UUIDGenerator::toBinary($uuid);
+        } else {
+            $data .= str_repeat("\x00", 16);
+        }
+
         // Hardcore (bool)
         $data .= pack('c', 0); // false
 
@@ -348,23 +405,14 @@ class PacketFactory {
         // World count (VarInt) — always 1
         $data .= VarInt::write(1);
 
-        // World names — array of strings
+        // Dimension names — array of strings
         $data .= StringHandler::write("minecraft:overworld");
 
-        // Dimension registry (NBT Tag Compound)
-        $registryNBT = $this->createDimensionRegistryNBT();
-        $data .= $registryNBT;
-
-        // Dimension type (String) — must match one from registry
-        $data .= StringHandler::write("minecraft:overworld");
-
-        // World name (String) — must match one from world_names
+        // World name (String) — must match one from dimension names
         $data .= StringHandler::write("minecraft:overworld");
 
         // Hashed seed (long, 64-bit, big-endian)
-        $seed = crc32("default_seed" . time()); // 32-bit, but we need 64-bit
-        // Use 0 for seed if you don't care — Minecraft doesn't validate it strictly
-        $data .= pack('J', 0); // 64-bit signed long, big-endian
+        $data .= pack('J', 0); // Minecraft не валидирует сид строго
 
         // Max players (VarInt)
         $data .= VarInt::write(20);
@@ -381,158 +429,14 @@ class PacketFactory {
         // Enable respawn screen (bool)
         $data .= pack('c', 1);
 
-        // Is debug (bool) — 1.20.1: no longer used, but still sent
+        // Is debug (bool)
         $data .= pack('c', 0);
 
-        // Is flat (bool) — ❌ REMOVED in 1.20.1! DO NOT SEND!
-        // This field was removed in 1.20+ — sending it causes client crash!
-        // So we STOP HERE — NO MORE FIELDS!
+        // Is flat (bool) — ❌ REMOVED in 1.20+! DO NOT SEND!
+        // Этот поле удалено в 1.20+ — его отправка ломает парсер клиента (DecoderException)!
+        // Поэтому здесь ОСТАНАВЛИВАЕМСЯ — больше полей нет!
 
         return $data;
-    }
-
-    private function createDimensionRegistryNBT(): string {
-        $writer = new NBTWriter();
-        $writer->reset();
-
-        // Root compound
-        $writer->writeByte(10); // TAG_Compound
-        $writer->writeString(''); // empty name
-
-        // minecraft:dimension_type
-        $writer->writeByte(10); // TAG_Compound
-        $writer->writeString('minecraft:dimension_type');
-
-        // List of dimension types (TAG_List of TAG_Compound)
-        $writer->writeByte(9); // TAG_List
-        $writer->writeString('type');
-        $writer->writeByte(10); // TAG_Compound (element type)
-        $writer->writeInt(1); // 1 element
-
-        // First (and only) dimension type
-        $writer->writeByte(10); // TAG_Compound
-        $writer->writeString(''); // empty name
-
-        // name
-        $writer->writeByte(8); // TAG_String
-        $writer->writeString('minecraft:overworld');
-
-        // id
-        $writer->writeByte(3); // TAG_Int
-        $writer->writeInt(0);
-
-        // element
-        $writer->writeByte(10); // TAG_Compound
-        $writer->writeString('element');
-
-        // ultrawarm
-        $writer->writeByte(1); // TAG_Byte
-        $writer->writeString('ultrawarm');
-        $writer->writeByte(0);
-
-        // natural
-        $writer->writeByte(1); // TAG_Byte
-        $writer->writeString('natural');
-        $writer->writeByte(1);
-
-        // coordinate_scale
-        $writer->writeByte(6); // TAG_Double
-        $writer->writeString('coordinate_scale');
-        $writer->buffer .= pack('d', 1.0); // native double, little-endian → but NBT expects big-endian
-
-        // ambient_light
-        $writer->writeByte(6); // TAG_Double
-        $writer->writeString('ambient_light');
-        $writer->buffer .= pack('d', 0.0);
-
-        // has_ceiling
-        $writer->writeByte(1); // TAG_Byte
-        $writer->writeString('has_ceiling');
-        $writer->writeByte(0);
-
-        // has_skylight
-        $writer->writeByte(1); // TAG_Byte
-        $writer->writeString('has_skylight');
-        $writer->writeByte(1);
-
-        // piglin_safe
-        $writer->writeByte(1); // TAG_Byte
-        $writer->writeString('piglin_safe');
-        $writer->writeByte(0);
-
-        // bed_works
-        $writer->writeByte(1); // TAG_Byte
-        $writer->writeString('bed_works');
-        $writer->writeByte(1);
-
-        // respawn_anchor_works
-        $writer->writeByte(1); // TAG_Byte
-        $writer->writeString('respawn_anchor_works');
-        $writer->writeByte(0);
-
-        // has_raids
-        $writer->writeByte(1); // TAG_Byte
-        $writer->writeString('has_raids');
-        $writer->writeByte(1);
-
-        // min_y
-        $writer->writeByte(3); // TAG_Int
-        $writer->writeString('min_y');
-        $writer->writeInt(0);
-
-        // height
-        $writer->writeByte(3); // TAG_Int
-        $writer->writeString('height');
-        $writer->writeInt(256);
-
-        // logical_height
-        $writer->writeByte(3); // TAG_Int
-        $writer->writeString('logical_height');
-        $writer->writeInt(256);
-
-        // infiniburn
-        $writer->writeByte(8); // TAG_String
-        $writer->writeString('infiniburn');
-        $writer->writeString('#minecraft:infiniburn_overworld');
-
-        // effects
-        $writer->writeByte(8); // TAG_String
-        $writer->writeString('effects');
-        $writer->writeString('minecraft:overworld');
-
-        // monster_spawn_light_level
-        $writer->writeByte(3); // TAG_Int
-        $writer->writeString('monster_spawn_light_level');
-        $writer->writeInt(7);
-
-        // monster_spawn_block_light_limit
-        $writer->writeByte(3); // TAG_Int
-        $writer->writeString('monster_spawn_block_light_limit');
-        $writer->writeInt(0);
-
-        // End element compound
-        $writer->writeByte(0);
-
-        // End dimension type compound
-        $writer->writeByte(0);
-
-        // End minecraft:dimension_type
-        $writer->writeByte(0);
-
-        // minecraft:worldgen/biome — empty
-        $writer->writeByte(10); // TAG_Compound
-        $writer->writeString('minecraft:worldgen/biome');
-        $writer->writeByte(9); // TAG_List
-        $writer->writeString('type');
-        $writer->writeByte(10); // TAG_Compound
-        $writer->writeInt(0); // 0 elements
-        $writer->writeByte(0); // end list
-        $writer->writeByte(0); // end compound
-
-        // End root compound
-        $writer->writeByte(0);
-
-        return $writer->getBuffer();
     }
 
     public function createPlayerPosition(int $clientId): string {
@@ -561,12 +465,16 @@ class PacketFactory {
     public function createPlayerAbilities(int $clientId): string {
         $data = '';
 
-        // Flags: 0x0B = 0b1011 = invulnerable, flying, allow_flying, creative mode
-        $data .= pack('c', 0x0B);
+        // Flags (byte) — 0x09 = invulnerable(0x01) | allow flying(0x08)
+        $data .= pack('c', 0x09);
 
         // Fly speed and Walk speed - big-endian float
         $data .= pack('G', 0.05); // Fly speed
         $data .= pack('G', 0.1);  // Walk speed
+
+        // Has fly speed: false / Has walk speed: false (1.20.1)
+        $data .= pack('c', 0);
+        $data .= pack('c', 0);
 
         return $data;
     }
@@ -609,15 +517,16 @@ class PacketFactory {
     }
 
     public function createPlayerInfo(int $clientId, string $username, string $uuid): string {
+        if ($uuid === '') {
+            $uuid = UUIDGenerator::generateOffline($username);
+        }
+
         $data = '';
 
-        // Action: 0x00 = Add Player
-        $data .= VarInt::write(0);
-
-        // Number of players: 1
+        // Number of players (VarInt) — 1.20.1 format: count first, no action byte
         $data .= VarInt::write(1);
 
-        // UUID
+        // UUID (16 raw bytes)
         $data .= UUIDGenerator::toBinary($uuid);
 
         // Username
@@ -883,24 +792,65 @@ class LoginHandler implements PacketHandler {
         $offset = 0;
         $packetId = VarInt::read($packetData, $offset);
 
-        if ($packetId === 0x00) {
+        if ($packetId === 0x00) { // Login Start
+            // 1. Читаем имя игрока (VarInt длина + строка)
             $username = StringHandler::read($packetData, $offset);
             $this->server->setConnectionUsername($clientId, $username);
+            PacketLogger::logInfo("📝 Login Start: username={$username} (клиент {$clientId})");
 
-            PacketLogger::logInfo("Login Start: $username (клиент $clientId)");
+            // 2. В Minecraft 1.19.3+ (включая 1.20.1) сразу после имени идет UUID (ровно 16 байт).
+            // Никакого "Has Signature Data" в этом месте нет — не читаем сигнатуры для offline-mode.
+            $remainingBytes = strlen($packetData) - $offset;
+            $uuid = null;
 
-            $uuid = UUIDGenerator::generate($username);
+            if ($remainingBytes >= 16) {
+                // Читаем ровно 16 байт UUID, которые прислал клиент
+                $uuidBytes = substr($packetData, $offset, 16);
+                $uuid = UUIDGenerator::fromBytes($uuidBytes);
+                PacketLogger::logInfo("🎯 Используем UUID клиента: {$uuid}");
+            } else {
+                // Fallback только если клиент прислал битый пакет (например, очень старый лаунчер)
+                $uuid = UUIDGenerator::generateOffline($username);
+                PacketLogger::logInfo("⚠️ Fallback: Сгенерирован offline UUID: {$uuid}");
+            }
+
             $this->server->setConnectionUUID($clientId, $uuid);
-            PacketLogger::logInfo("Сгенерирован UUID: $uuid для клиента $clientId");
 
-            $uuidBytes = UUIDGenerator::toBinary($uuid);
-            $usernameBytes = StringHandler::write($username);
+            // 3. Сразу отправляем Login Success (0x02). Никаких задержек и никаких
+            // Login Plugin Request — отправка любого пакета до Login Acknowledged ломает парсер клиента!
+            $successPayload = UUIDGenerator::toBinary($uuid) . StringHandler::write($username);
+            $this->server->sendPacket($clientId, 0x02, $successPayload);
+            PacketLogger::logInfo("✅ Login Success (0x02) отправлен клиенту $clientId");
 
-            $this->server->sendPacket($clientId, 0x02, $uuidBytes . $usernameBytes);
-            PacketLogger::logInfo("Login Success отправлен клиенту $clientId");
+            // 4. Теперь мы ЖДЕМ, что клиент пришлет Login Acknowledged (0x03)
+            PacketLogger::logInfo("⏳ Ожидаем Login Acknowledged (0x03) от клиента...");
+        } elseif ($packetId === 0x03) { // Login Acknowledged
+            PacketLogger::logInfo("✅ Получен Login Acknowledged (0x03). Переход в Configuration State.");
+            $this->server->setConnectionState($clientId, 'configuration');
+            $this->server->sendConfigurationPackets($clientId);
+        } else {
+            PacketLogger::logInfo("⚠️ Неожиданный пакет 0x" . dechex($packetId) . " в состоянии Login");
+        }
+    }
+}
 
+class ConfigurationHandler implements PacketHandler {
+    private MinecraftServer $server;
+
+    public function __construct(MinecraftServer $server) {
+        $this->server = $server;
+    }
+
+    public function handle(int $clientId, string $packetData): void {
+        $offset = 0;
+        $packetId = VarInt::read($packetData, $offset);
+
+        if ($packetId === 0x02) { // Acknowledge Finish Configuration (Client -> Server)
+            PacketLogger::logInfo("✅ Configuration завершена. Переход в PLAY State. Спавним игрока...");
             $this->server->setConnectionState($clientId, 'play');
-            $this->server->sendGamePackets($clientId, $username, $uuid);
+            $this->server->sendGamePackets($clientId);
+        } else {
+            PacketLogger::logInfo("📥 Игнорируем конфигурационный пакет 0x" . dechex($packetId));
         }
     }
 }
@@ -917,17 +867,36 @@ class PlayHandler implements PacketHandler {
         $packetId = VarInt::read($packetData, $offset);
 
         switch ($packetId) {
-            case 0x1F: // Keep Alive
+            case 0x12: // Keep Alive (Client -> Server, 1.20.1)
                 $keepAliveId = unpack('J', substr($packetData, $offset, 8))[1] ?? 0;
-                $response = pack('J', $keepAliveId);
-                $this->server->sendPacket($clientId, 0x1F, $response);
                 PacketLogger::logInfo("Keep Alive получен от клиента $clientId: $keepAliveId");
                 break;
 
-            case 0x03: // Chat Message
-                $messageLength = VarInt::read($packetData, $offset);
-                $message = substr($packetData, $offset, $messageLength);
-                PacketLogger::logInfo("Чат от клиента $clientId: $message");
+            case 0x1C: // Teleport Confirmation (Client -> Server, 1.20.1)
+                $teleportId = VarInt::read($packetData, $offset);
+                $expected = $this->server->getExpectedTeleportId($clientId);
+                if ($expected !== null && $teleportId === $expected) {
+                    $this->server->onTeleportConfirmed($clientId);
+                    PacketLogger::logInfo("✅ Телепорт подтвержден клиентом $clientId (id=$teleportId). Позиция зафиксирована.");
+                } else {
+                    PacketLogger::logInfo("Teleport Confirm от клиента $clientId: id=$teleportId (ожидался $expected)");
+                }
+                break;
+
+            case 0x0A: // Move and Look with State / Position (зависит от версии, просто логируем)
+            case 0x0B: // Move with Rotation/State
+            case 0x0C: // Move/Rotations variants
+                PacketLogger::logDebug("Движение игрока (клиент $clientId), пакет 0x" . dechex($packetId));
+                break;
+
+            case 0x03: // Chat Preview / Sign edit и т.п. — пробуем прочитать как строку
+                $remaining = strlen($packetData) - $offset;
+                if ($remaining > 0) {
+                    $message = StringHandler::read($packetData, $offset);
+                    if ($message !== '') {
+                        PacketLogger::logInfo("Чат/текст от клиента $clientId: $message");
+                    }
+                }
                 break;
         }
     }
@@ -1001,6 +970,7 @@ class MinecraftServer {
         $this->packetDispatcher->registerHandler('handshake', new HandshakeHandler($this));
         $this->packetDispatcher->registerHandler('status', new StatusHandler($this, $this->packetFactory));
         $this->packetDispatcher->registerHandler('login', new LoginHandler($this, $this->packetFactory));
+        $this->packetDispatcher->registerHandler('configuration', new ConfigurationHandler($this));
         $this->packetDispatcher->registerHandler('play', new PlayHandler($this));
 
         PacketLogger::clearLog();
@@ -1084,7 +1054,50 @@ class MinecraftServer {
         }
     }
 
-    public function sendGamePackets(int $clientId, string $username, string $uuid): void {
+    /**
+     * Configuration State (1.20.1): отправляем минимальный набор пакетов и ждем
+     * Acknowledge Finish Configuration (0x02) от клиента.
+     */
+    public function sendConfigurationPackets(int $clientId): void {
+        PacketLogger::logInfo("📦 Отправка Configuration пакетов клиенту $clientId...");
+
+        if (!$this->connectionManager->isClientConnected($clientId)) {
+            PacketLogger::logError("Соединение разорвано перед отправкой Configuration пакетов");
+            return;
+        }
+
+        // 1. Plugin Message — Minecraft Brand ("brand" канал, payload = VarInt строка "minecraft")
+        $brandPayload = StringHandler::write('minecraft');
+        $brandData = StringHandler::write('minecraft:brand') . $brandPayload;
+        $this->sendPacket($clientId, 0x00, $brandData); // CB_CONFIG_PLUGIN_MESSAGE
+        PacketLogger::logInfo("⬅️ Plugin Message (brand, 0x00) отправлен");
+
+        // 2. Known Packs (0x0D) — один пак "minecraft/core"
+        $knownPacksData = '';
+        $knownPacksData .= VarInt::write(1);                     // Количество паков
+        $knownPacksData .= StringHandler::write('minecraft');    // Namespace
+        $knownPacksData .= StringHandler::write('core');         // ID
+        $knownPacksData .= StringHandler::write('1.20.1');       // Version
+        $this->sendPacket($clientId, 0x0D, $knownPacksData);     // CB_CONFIG_KNOWN_PACKS
+        PacketLogger::logInfo("⬅️ Known Packs (0x0D) отправлен");
+
+        // 3. Finish Configuration (0x02) — пустой payload.
+        // Клиент ответит Acknowledge Finish Configuration (0x02), после чего мы перейдем в Play.
+        $this->sendPacket($clientId, 0x02, '');                  // CB_CONFIG_FINISH_CONFIGURATION
+        PacketLogger::logInfo("⬅️ Finish Configuration (0x02) отправлен");
+
+        PacketLogger::logInfo("⏳ Ожидаем Acknowledge Finish Configuration (0x02) от клиента...");
+    }
+
+    /**
+     * Play State: спавним игрока (Join Game + позиционные и служебные пакеты).
+     * Имя и UUID берем из состояния соединения (получены на этапе Login Start).
+     */
+    public function sendGamePackets(int $clientId): void {
+        $conn = $this->connectionManager->getConnections()[$clientId] ?? null;
+        $username = $conn['username'] ?? 'Player';
+        $uuid = $conn['uuid'] ?? '';
+
         PacketLogger::logInfo("Начинаю отправку игровых пакетов клиенту $clientId...");
 
         if (!$this->connectionManager->isClientConnected($clientId)) {
@@ -1095,99 +1108,55 @@ class MinecraftServer {
         try {
             PacketLogger::logInfo("Отправка игровых пакетов для Minecraft 1.20.1...");
 
-            // 1. Feature Flags (0x08)
-            $featureFlagsData = $this->packetFactory->createFeatureFlags();
-            $this->sendPacket($clientId, 0x08, $featureFlagsData);
-            PacketLogger::logInfo("Feature Flags (0x08) отправлен клиенту $clientId");
-            $this->sleepWithCheck(50000, $clientId); // 50ms
-
-            if (!$this->connectionManager->isClientConnected($clientId)) {
-                PacketLogger::logError("Соединение разорвано перед отправкой Join Game");
-                return;
-            }
-
-            // 2. Join Game (0x26) - ИСПРАВЛЕННЫЙ ФОРМАТ
+            // 1. Join Game (0x26) — формат 1.20.1 (без NBT-реестра, без is_flat!)
             $joinGameData = $this->packetFactory->createJoinGame($clientId, $uuid);
             $this->sendPacket($clientId, 0x26, $joinGameData);
             PacketLogger::logInfo("Join Game (0x26) отправлен клиенту $clientId");
-            $this->sleepWithCheck(50000, $clientId); // 50ms
 
-            if (!$this->connectionManager->isClientConnected($clientId)) {
-                PacketLogger::logError("Соединение разорвано перед отправкой Player Info");
-                return;
-            }
-
-            // 3. Player Info (0x32)
+            // 2. Player Info (0x34)
             $playerInfoData = $this->packetFactory->createPlayerInfo($clientId, $username, $uuid);
-            $this->sendPacket($clientId, 0x32, $playerInfoData);
-            PacketLogger::logInfo("Player Info (0x32) отправлен клиенту $clientId");
-            $this->sleepWithCheck(30000, $clientId); // 30ms
+            $this->sendPacket($clientId, 0x34, $playerInfoData);
+            PacketLogger::logInfo("Player Info (0x34) отправлен клиенту $clientId");
 
-            if (!$this->connectionManager->isClientConnected($clientId)) {
-                PacketLogger::logError("Соединение разорвано перед отправкой Tags");
-                return;
-            }
+            // 3. Update View Position (0x49)
+            $viewPosData = pack('N', 0) . pack('N', 0);
+            $this->sendPacket($clientId, 0x49, $viewPosData);
+            PacketLogger::logInfo("Update View Position (0x49) отправлен клиенту $clientId");
 
-            // 4. Tags (0x5A)
-            $nbtWriter = new NBTWriter();
-            $tagsData = $nbtWriter->writeSimpleTags();
-            $this->sendPacket($clientId, 0x5A, $tagsData);
-            PacketLogger::logInfo("Tags (0x5A) отправлен клиенту $clientId");
-            $this->sleepWithCheck(50000, $clientId); // 50ms
+            // 4. Update View Distance (0x4B)
+            $viewDistData = VarInt::write(10);
+            $this->sendPacket($clientId, 0x4B, $viewDistData);
+            PacketLogger::logInfo("Update View Distance (0x4B) отправлен клиенту $clientId");
 
-            if (!$this->connectionManager->isClientConnected($clientId)) {
-                PacketLogger::logError("Соединение разорвано перед отправкой Spawn Position");
-                return;
-            }
-
-            // 5. Spawn Position (0x41)
+            // 5. Spawn Position (0x4D в 1.20.1)
             $spawnPositionData = $this->packetFactory->createSpawnPosition($clientId);
-            $this->sendPacket($clientId, 0x41, $spawnPositionData);
-            PacketLogger::logInfo("Spawn Position (0x41) отправлен клиенту $clientId");
-            $this->sleepWithCheck(30000, $clientId); // 30ms
+            $this->sendPacket($clientId, 0x4D, $spawnPositionData);
+            PacketLogger::logInfo("Spawn Position (0x4D) отправлен клиенту $clientId");
 
-            if (!$this->connectionManager->isClientConnected($clientId)) {
-                PacketLogger::logError("Соединение разорвано перед отправкой Chunk Data");
-                return;
-            }
-
-            // 6. Chunk Data (0x22)
-            $chunkData = WorldGenerator::generateFlatChunk();
-            $this->sendPacket($clientId, 0x22, $chunkData);
-            PacketLogger::logInfo("Chunk Data (0x22) отправлен клиенту $clientId");
-            $this->sleepWithCheck(50000, $clientId); // 50ms
-
-            if (!$this->connectionManager->isClientConnected($clientId)) {
-                PacketLogger::logError("Соединение разорвано перед отправкой Player Position");
-                return;
-            }
-
-            // 7. Player Position and Look (0x37)
-            $positionData = $this->packetFactory->createPlayerPosition($clientId);
-            $this->sendPacket($clientId, 0x37, $positionData);
-            PacketLogger::logInfo("Player Position and Look (0x37) отправлен клиенту $clientId");
-            $this->sleepWithCheck(30000, $clientId); // 30ms
-
-            if (!$this->connectionManager->isClientConnected($clientId)) {
-                PacketLogger::logError("Соединение разорвано перед отправкой Player Abilities");
-                return;
-            }
-
-            // 8. Player Abilities (0x39)
+            // 6. Player Abilities (0x1E)
             $abilitiesData = $this->packetFactory->createPlayerAbilities($clientId);
-            $this->sendPacket($clientId, 0x39, $abilitiesData);
-            PacketLogger::logInfo("Player Abilities (0x39) отправлен клиенту $clientId");
-            $this->sleepWithCheck(30000, $clientId); // 30ms
+            $this->sendPacket($clientId, 0x1E, $abilitiesData);
+            PacketLogger::logInfo("Player Abilities (0x1E) отправлен клиенту $clientId");
 
-            if (!$this->connectionManager->isClientConnected($clientId)) {
-                PacketLogger::logError("Соединение разорвано перед отправкой Keep Alive");
-                return;
-            }
+            // 7. Chunk Data (0x1D) + свет (0x22) — игрок должен увидеть блоки под ногами
+            $chunkData = WorldGenerator::generateFlatChunk();
+            $this->sendPacket($clientId, 0x1D, $chunkData);
+            $lightData = "\x00" . VarInt::write(1) . VarInt::write(0) . VarInt::write(1) . VarInt::write(2048) . str_repeat("\xff", 2048);
+            $this->sendPacket($clientId, 0x22, $lightData);
+            PacketLogger::logInfo("Chunk Data (0x1D) + Map Chunk Light (0x22) отправлены клиенту $clientId");
 
-            // 9. Keep Alive (0x1F)
+            // 8. Synchronize Player Position (0x3A) — телепорт игрока, чтобы он появился в мире.
+            // ВАЖНО: после Join Game клиент игнорирует позиции до получения этого пакета.
+            $positionData = $this->packetFactory->createPlayerPosition($clientId);
+            $this->sendPacket($clientId, 0x3A, $positionData);
+            $this->connectionManager->setTeleportAck($clientId, 1);
+            PacketLogger::logInfo("Player Position (0x3A) отправлен клиенту $clientId. Игрок должен появиться в мире!");
+
+            // 9. Keep Alive (0x33 в 1.20.1)
             $keepAliveData = $this->packetFactory->createKeepAlive($clientId);
-            $this->sendPacket($clientId, 0x1F, $keepAliveData);
-            PacketLogger::logInfo("Keep Alive (0x1F) отправлен клиенту $clientId");
+            $this->connectionManager->setKeepAliveId($clientId, $keepAliveData);
+            $this->sendPacket($clientId, 0x33, $keepAliveData);
+            PacketLogger::logInfo("Keep Alive (0x33) отправлен клиенту $clientId");
 
             $world = $this->config->getWorld();
             PacketLogger::logInfo("🌍 Мир загружен для клиента $clientId, игрок на позиции {$world['spawn']['x']}, {$world['spawn']['y']}, {$world['spawn']['z']}");
@@ -1201,25 +1170,13 @@ class MinecraftServer {
 
     private function sendKeepAlive(int $clientId): void {
         $keepAliveData = $this->packetFactory->createKeepAlive($clientId);
-        $this->sendPacket($clientId, 0x1F, $keepAliveData);
-        PacketLogger::logInfo("Keep Alive отправлен клиенту $clientId");
+        $this->connectionManager->setKeepAliveId($clientId, $keepAliveData);
+        $this->sendPacket($clientId, 0x33, $keepAliveData);
+        PacketLogger::logInfo("Keep Alive (0x33) отправлен клиенту $clientId");
     }
 
     public function sendPacket(int $clientId, int $packetId, string $data): bool {
         return $this->connectionManager->sendPacket($clientId, $packetId, $data);
-    }
-
-    private function sleepWithCheck(int $microseconds, int $clientId): void {
-        $start = microtime(true);
-        $sleepTime = $microseconds / 1000000;
-
-        while ((microtime(true) - $start) < $sleepTime) {
-            if (!$this->connectionManager->isClientConnected($clientId)) {
-                PacketLogger::logDebug("Прерывание сна - клиент $clientId отключился");
-                break;
-            }
-            usleep(1000); // 1ms
-        }
     }
 
     public function getProtocolVersion(): int {
