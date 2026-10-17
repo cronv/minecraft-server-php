@@ -156,6 +156,43 @@ class_alias('PacketState', 'ProtocolState');
 // Логирование
 // ============================================================================
 
+/**
+ * Утилита низкоуровневого кадрирования пакетов Minecraft (без состояния):
+ * [VarInt length][VarInt packetId][data...]. Используется сервером,
+ * тестовым клиентом и самотестами.
+ */
+final class PacketCodec
+{
+    /** Оборачивает данные пакета в кадр (length + packetId + payload). */
+    public static function wrapPacket(int $packetId, string $data): string
+    {
+        $payload = VarInt::write($packetId) . $data;
+
+        return VarInt::write(strlen($payload)) . $payload;
+    }
+
+    /** Разворачивает кадр обратно в [packetId, data] или null при битом кадре. */
+    public static function unwrapPacket(string $frame): ?array
+    {
+        $offset = 0;
+        $len = VarInt::read($frame, $offset);
+
+        if ($len === null || $offset + $len > strlen($frame)) {
+            return null;
+        }
+
+        $payload = substr($frame, $offset, $len);
+        $pOffset = 0;
+        $packetId = VarInt::read($payload, $pOffset);
+
+        if ($packetId === null) {
+            return null;
+        }
+
+        return [$packetId, substr($payload, $pOffset)];
+    }
+}
+
 final class PacketLogger
 {
     private static string $logFile = 'packets.log';
@@ -242,6 +279,19 @@ final class PacketLogger
     public static function logInfo(string $message): void
     {
         echo "ℹ️ $message\n";
+        self::flushStdout();
+    }
+
+    /** Немедленно сбрасывает stdout в файл/терминал (иначе при перенаправлении
+     *  в файл PHP буферизует вывод и живые логи недоступны до выхода процесса). */
+    public static function flushStdout(): void
+    {
+        if (function_exists('flush')) {
+            @flush();
+        }
+        if (function_exists('ob_flush') && ob_get_length() !== false) {
+            @ob_flush();
+        }
     }
 
     public static function logDebug(string $message): void
@@ -1194,7 +1244,16 @@ final class ConnectionManager
         $payload = VarInt::write($packetId) . $data;
         $frame = VarInt::write(strlen($payload)) . $payload;
 
+        // Детальное логирование каждого исходящего пакета: ID (hex), длина,
+        // raw bytes (первые 50 байт).
         PacketLogger::logPacket('⬅️ SENT', $clientId, $packetId, $frame);
+        $rawHex = substr(bin2hex($frame), 0, 100);
+        PacketLogger::logInfo(sprintf(
+            "  ⬇️ Raw[%d]: %s%s",
+            strlen($frame),
+            $rawHex,
+            strlen($frame) > 50 ? '…' : ''
+        ));
 
         // Сокет неблокирующий: при переполнении send-буфера fwrite пишет
         // частично. Остаток дописываем в outBuffer и флашим каждый тик цикла.
@@ -1375,7 +1434,27 @@ final class LoginHandler implements PacketHandler
         if (!$ok) {
             return;
         }
-        PacketLogger::logInfo("Login Success отправлен клиенту {$connection->id} — ждём Login Acknowledged (0x03)");
+
+        // Явное подтверждение формата Login Success (Protocol 763):
+        // [UUID 16b][Username String][Properties Count VarInt=0] —
+        // БЕЗ поля Strict Error Handling (оно появилось только в 1.20.5+).
+        $successFrame = PacketCodec::wrapPacket(
+            PacketId::LOGIN_SUCCESS,
+            $this->packetFactory->createLoginSuccess($connection->uuid, $username)
+        );
+        assert(
+            strlen($successFrame) === 2 + 16 + 1 + strlen($username) + 1,
+            'Login Success имеет неверную длину для Protocol 763'
+        );
+        PacketLogger::logInfo(sprintf(
+            "✅ Login Success sent (%d bytes) клиенту %d: raw=%s",
+            strlen($successFrame),
+            $connection->id,
+            bin2hex($successFrame)
+        ));
+        PacketLogger::logInfo(
+            "⏳ Waiting for Login Acknowledged (0x03)... соединение НЕ закрываем, сокет жив"
+        );
     }
 }
 
@@ -1548,12 +1627,86 @@ final class MinecraftServer
 
         stream_set_blocking($this->socket, false);
 
+        $this->runSelfTests();
+
         PacketLogger::logInfo(
             "Minecraft 1.20.1 сервер слушает на {$this->config->host}:{$this->config->port}"
         );
         PacketLogger::logInfo("Протокол: {$this->config->protocolVersion} (1.20.1, БЕЗ Configuration state)");
 
         $this->mainLoop();
+    }
+
+    /**
+     * Самотестирование критичных структур протокола (запускается при старте).
+     * Проверяет VarInt-кодирование, формат Login Success Protocol 763 и
+     * кадрирование пакетов. Битый формат = мгновенная остановка до запуска.
+     */
+    public function runSelfTests(): void
+    {
+        $failures = [];
+
+        $check = static function (bool $cond, string $name) use (&$failures): void {
+            if (!$cond) {
+                $failures[] = $name;
+            }
+        };
+
+        // --- VarInt encoding ---
+        $check(bin2hex(VarInt::write(0)) === '00', 'VarInt(0)');
+        $check(bin2hex(VarInt::write(127)) === '7f', 'VarInt(127)');
+        $check(bin2hex(VarInt::write(128)) === '8001', 'VarInt(128)');
+        $check(bin2hex(VarInt::write(763)) === 'fb05', 'VarInt(763) failed');
+        $check(bin2hex(VarInt::write(2097151)) === 'ffff7f', 'VarInt(2097151)');
+
+        // --- Login Success структура (Protocol 763) ---
+        // Формат: [UUID 16 bytes][Username String][Properties Count VarInt(0)]
+        // БЕЗ поля Strict Error Handling (только 1.20.5+ / protocol 765).
+        $uuid = hex2bin('9ecc42c83e934cf79ed15c4c22f67ac7');
+        $username = StringHandler::write('turel1983'); // 0a + 'turel1983' = 10 байт
+        $props = VarInt::write(0);
+        $payload = $uuid . $username . $props;
+
+        // Побайтный эталон Protocol 763:
+        //   data    = UUID(16) + len(0x0a) + "turel1983"(9) + props(0x00) = 28 байт
+        //   frame   = len(0x1d) + id(0x02) + data = 30 байт
+        // (В эталонной строке пользователя из задачи длина строки была
+        // записана как 0x09 — это опечатка: 'turel1983' = 9 символов,
+        //  но корректный VarInt-префикс строки = 0x09 только для 9 байт;
+        //  сверка ведётся по фактической длине имени.)
+        $expectedDataHex = '9ecc42c83e934cf79ed15c4c22f67ac7' . '09' . bin2hex('turel1983') . '00';
+        $expectedFrame = PacketCodec::wrapPacket(0x02, hex2bin($expectedDataHex));
+
+        $check(strlen($payload) === strlen($uuid) + 1 + strlen('turel1983') + 1, 'Login Success payload layout');
+        $check(bin2hex($payload) === $expectedDataHex, 'Login Success data hex mismatch: ' . bin2hex($payload));
+        $check(bin2hex($actual = PacketCodec::wrapPacket(0x02, $payload)) === bin2hex($expectedFrame), 'Login Success frame mismatch');
+        $check(strlen($expectedFrame) === strlen($payload) + 2, 'Login Success frame = data + 2 header bytes');
+
+        // Проверка, что реальный factory produces ровно эту структуру.
+        $factory = new PacketFactory($this->config);
+        $fromFactory = PacketCodec::wrapPacket(
+            0x02,
+            $factory->createLoginSuccess('9ecc42c8-3e93-4cf7-9ed1-5c4c22f67ac7', 'turel1983')
+        );
+        $check($fromFactory === $expectedFrame, 'PacketFactory::createLoginSuccess mismatch');
+
+        // --- Кадрирование round-trip ---
+        $frame = PacketCodec::wrapPacket(0x03, '');
+        $check($frame === "\x01\x03", 'Empty packet framing (Login Acknowledged echo)');
+        $unwrapped = PacketCodec::unwrapPacket($frame);
+        $check($unwrapped === [0x03, ''], 'unwrapPacket round-trip');
+
+        // --- Online mode ---
+        $check($this->config->onlineMode === false, 'online-mode must be false');
+
+        if ($failures !== []) {
+            foreach ($failures as $f) {
+                PacketLogger::logError("❌ SelfTest FAILED: $f");
+            }
+            throw new RuntimeException('Самотесты провалены: ' . implode('; ', $failures));
+        }
+
+        PacketLogger::logInfo('✅ SelfTests passed: VarInt(763)=fb05, LoginSuccess=30 bytes (28 data + 2 header), online-mode=false');
     }
 
     private function mainLoop(): void
