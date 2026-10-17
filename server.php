@@ -55,10 +55,18 @@ final class PacketId
 
     // --- Server-bound (C→S) Play (Protocol 763) ---
     public const CS_PLAY_CONFIRM_TELEPORT = 0x00;
+    public const CS_PLAY_TELEPORT_CONFIRM = 0x00; // алиас (то же значение)
     public const CS_PLAY_CLIENT_TICK = 0x04;
-    public const CS_PLAY_KEEP_ALIVE = 0x12;
     public const CS_PLAY_POSITION = 0x1C;
+    public const CS_PLAY_POSITION_LOOK = 0x06;
+    public const CS_PLAY_LOOK = 0x07;
+    public const CS_PLAY_FLYING = 0x08;
+    public const CS_PLAY_SETTINGS = 0x09;
+    public const CS_PLAY_WORLD_INTERACTION = 0x0A;
     public const CS_PLAY_SWING_ARM = 0x1B;
+    public const CS_PLAY_KEEP_ALIVE = 0x12;
+    public const CS_PLAY_PONG = 0x15;
+    public const CS_PLAY_CUSTOM_PAYLOAD = 0x16;
 
     // --- Client-bound (S→C) Login ---
     public const LOGIN_SUCCESS = 0x02;
@@ -127,6 +135,19 @@ final class PacketId
     public const PLAY_STOP_SOUND = 0x54;
     public const PLAY_CLEAR_TITLES = 0x59;
     public const PLAY_REMOVE_RESOURCE_PACK = 0x4E;
+
+    // --- Алиасы S→C Play (используются в коде сервера, те же значения) ---
+    public const PLAY_DIFFICULTY = self::PLAY_SERVER_DIFFICULTY;      // 0x36
+    public const PLAY_UPDATE_TIME = self::PLAY_TIME_UPDATE;           // 0x5A
+    public const PLAY_SPAWN_POSITION = self::PLAY_SET_DEFAULT_SPAWN_POSITION; // 0x49
+    public const PLAY_POSITION = self::PLAY_PLAYER_POSITION;          // 0x2C
+    public const PLAY_ABILITIES = self::PLAY_PLAYER_ABILITIES;        // 0x2E
+    public const PLAY_HELD_ITEM_SLOT = self::PLAY_HELD_ITEM_CHANGE;   // 0x48
+    public const PLAY_UPDATE_HEALTH = self::PLAY_SET_HEALTH;          // 0x30
+    public const PLAY_EXPERIENCE = self::PLAY_SET_XP;                 // 0x11
+    public const PLAY_HURT_ANIMATION = self::PLAY_HURT_ARMOR;         // 0x32
+    public const PLAY_SYSTEM_CHAT = self::PLAY_SYSTEM_CHAT_MESSAGE;   // 0x23
+    public const PLAY_MAP_CHUNK = self::PLAY_CHUNK_DATA;              // 0x21
 
     private function __construct()
     {
