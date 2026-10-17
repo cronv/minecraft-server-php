@@ -40,70 +40,93 @@ final class PacketId
     public const CS_LOGIN_START = 0x00;
     public const CS_LOGIN_ACKNOWLEDGED = 0x03;
 
-    // --- Server-bound (C→S) Configuration ---
-    public const CS_CONFIG_CLIENT_INFORMATION = 0x00;
-    public const CS_CONFIG_KEEP_ALIVE = 0x01;
-    public const CS_CONFIG_PING = 0x02;
-    public const CS_CONFIG_PLUGIN_MESSAGE = 0x03;
-    public const CS_CONFIG_FINISH_ACK = 0x04;
+    // --- Server-bound (C→S) Configuration (Protocol 763, по minecraft-data) ---
+    public const CS_CONFIG_PLUGIN_MESSAGE = 0x00;
+    public const CS_CONFIG_FINISHED_ACK = 0x01;
+    public const CS_CONFIG_KEEP_ALIVE = 0x02;
+    public const CS_CONFIG_PONG = 0x03;
+    public const CS_CONFIG_RESOURCE_PACK_STATUS = 0x04;
+    public const CS_CONFIG_GENERATE_STRUCTURE = 0x05;
+    public const CS_CONFIG_DELETE_STRUCTURE = 0x06;
+    public const CS_CONFIG_KNOWN_PACKS = 0x07;
+    public const CS_CONFIG_CLIENT_INFORMATION = 0x0B;
+    public const CS_CONFIG_SELECT_KNOWN_PACKS = 0x0D;
+    public const CS_CONFIG_MODERN_BRAND = 0x0F;
 
-    // --- Server-bound (C→S) Play ---
-    public const CS_PLAY_CONFIRM_TELEPORT = 0x19;
+    // --- Server-bound (C→S) Play (Protocol 763) ---
+    public const CS_PLAY_CONFIRM_TELEPORT = 0x00;
+    public const CS_PLAY_CLIENT_TICK = 0x04;
     public const CS_PLAY_KEEP_ALIVE = 0x12;
-    public const CS_PLAY_CHAT = 0x03;
+    public const CS_PLAY_POSITION = 0x1C;
     public const CS_PLAY_SWING_ARM = 0x1B;
-    public const CS_PLAY_CLIENT_TICK = 0x0A;
 
     // --- Client-bound (S→C) Login ---
     public const LOGIN_SUCCESS = 0x02;
 
-    // --- Client-bound (S→C) Configuration ---
-    public const CONFIG_CLIENT_INFORMATION = 0x00;
+    // --- Client-bound (S→C) Configuration (Protocol 763) ---
     public const CONFIG_KEEP_ALIVE = 0x01;
     public const CONFIG_PING = 0x02;
     public const CONFIG_PLUGIN_MESSAGE = 0x03;
-    public const CONFIG_FINISH_CONFIGURATION = 0x04;
-    public const CONFIG_REGISTRY_DATA = 0x07;
-    public const CONFIG_REMOVE_RESOURCE_PACK = 0x05;
-    public const CONFIG_FEATURE_FLAGS = 0x0C;
-    public const CONFIG_UPDATE_TAGS = 0x0D;
+    public const CONFIG_DISCONNECT = 0x04;
+    public const CONFIG_FINISH_CONFIGURATION = 0x05;
+    public const CONFIG_RESOURCE_PACK = 0x07;
+    public const CONFIG_TRANSFER_HANDLER = 0x08;
+    public const CONFIG_FEATURE_FLAGS = 0x09;
+    public const CONFIG_REGISTRY_DATA = 0x0A;
+    public const CONFIG_REMOVE_RESOURCE_PACK = 0x0B;
+    public const CONFIG_UPDATE_TAGS = 0x0C;
+    public const CONFIG_KNOWN_PACKS = 0x0E;
 
-    // --- Client-bound (S→C) Play ---
+    // --- Client-bound (S→C) Play (Protocol 763, по minecraft-data/protocol.json) ---
     public const PLAY_SPAWN_ENTITY = 0x01;
-    public const PLAY_PLUGIN_MESSAGE = 0x17;
-    public const PLAY_SET_DEATH_LOCATION = 0x1E;
-    public const PLAY_SYSTEM_CHAT_MESSAGE = 0x1F;
-    public const PLAY_PING = 0x20;
-    public const PLAY_KEEP_ALIVE = 0x21;
-    public const PLAY_JOIN_GAME = 0x26;
-    public const PLAY_PLAYER_INFO = 0x2D;
-    public const PLAY_SEARCH_CREATIVE_TAB = 0x2E;
-    public const PLAY_SERVER_DIFFICULTY = 0x33;
-    public const PLAY_EMPTY_CHUNK_SNAPSHOT = 0x34;
-    public const PLAY_TIME_OF_DAY = 0x5B;
-    public const PLAY_PLAYER_POSITION = 0x38;
-    public const PLAY_HELD_ITEM_CHANGE = 0x3C;
-    public const PLAY_CREATE_SCREEN = 0x3E;
-    public const PLAY_SET_HEALTH = 0x3F;
-    public const PLAY_HURT_ARMOR = 0x40;
-    public const PLAY_INT_1B_EFFECT = 0x42;
-    public const PLAY_SET_TITLE_TEXT = 0x44;
-    public const PLAY_PLAYER_ABILITIES = 0x45;
-    public const PLAY_SET_EXPERIENCE = 0x47;
-    public const PLAY_PLAYER_COMPOSITION = 0x48;
-    public const PLAY_SET_COOLDOWN = 0x4A;
-    public const PLAY_SET_DEFAULT_SPAWN_POSITION = 0x4E;
-    public const PLAY_DECLARE_COMMANDS = 0x4F;
-    public const PLAY_MULTI_BLOCK_CHANGE = 0x51;
-    public const PLAY_UNLOAD_CHUNK = 0x53;
-    public const PLAY_BLOCK_UPDATE = 0x54;
-    public const PLAY_MAP_ID = 0x55;
-    public const PLAY_SET_ACTION_BAR_TEXT = 0x57;
-    public const PLAY_WORLD_BORDER_CENTER = 0x58;
-    public const PLAY_SECTION_BLOCK_UPDATE = 0x59;
-    public const PLAY_CHUNK_DATA = 0x5A;
-    public const PLAY_SYNC_PLAYER_POSITION = 0x5E;
-    public const PLAY_GAME_EVENT = 0x1B;
+    public const PLAY_DECLARE_COMMANDS = 0x07;
+    public const PLAY_MULTI_BLOCK_CHANGE = 0x08;
+    public const PLAY_GAME_EVENT = 0x0A;
+    public const PLAY_EMPTY_CHUNK_SNAPSHOT = 0x0D;
+    public const PLAY_SET_XP = 0x11;
+    public const PLAY_INITIALIZE_WINDOW = 0x14;
+    public const PLAY_KEEP_ALIVE = 0x1F;
+    public const PLAY_WORLD_EVENTS = 0x20;
+    public const PLAY_SECTION_BLOCKS_UPDATE = 0x22;
+    public const PLAY_SYSTEM_CHAT_MESSAGE = 0x23;
+    public const PLAY_PLAYER_INFO = 0x25;
+    public const PLAY_LIMITED_PACKET_SIZE = 0x27;
+    public const PLAY_SET_TITLE_TEXT = 0x28;
+    public const PLAY_ADD_PLAYER = 0x29;
+    public const PLAY_JOIN_GAME = 0x2A;
+    public const PLAY_PLAYER_POSITION = 0x2C;
+    public const PLAY_PLAYER_ABILITIES = 0x2E;
+    public const PLAY_PLAYER_COMPOSITION = 0x2F;
+    public const PLAY_SET_HEALTH = 0x30;
+    public const PLAY_SET_PASSIVES = 0x31;
+    public const PLAY_HURT_ARMOR = 0x32;
+    public const PLAY_SERVER_DIFFICULTY = 0x36;
+    public const PLAY_SIMULATION_DISTANCE = 0x3D;
+    public const PLAY_POSITION_SYNC = 0x40;
+    public const PLAY_SET_SLOT = 0x42;
+    public const PLAY_ACTIONBAR_TEXT = 0x46;
+    public const PLAY_SET_DEFAULT_SPAWN_POSITION = 0x49;
+    public const PLAY_MAP_ID = 0x4B;
+    public const PLAY_REQUEST_PERMISSIONS = 0x4D;
+    public const PLAY_TITLE_SUBTITLE = 0x55;
+    public const PLAY_TIME_UPDATE = 0x5A;
+    public const PLAY_SET_CRAFT_RESULT = 0x57;
+    public const PLAY_PLUGIN_MESSAGE = 0x18;
+    public const PLAY_ACKNOWLEDGE_CHUNKS = 0x06;
+    public const PLAY_CHUNK_DATA = 0x21;
+    public const PLAY_UNLOAD_CHUNK = 0x1E;
+    public const PLAY_BLOCK_UPDATE = 0x0B;
+    public const PLAY_HELD_ITEM_CHANGE = 0x48;
+    public const PLAY_CLOSE_CONTAINER = 0x12;
+    public const PLAY_OPEN_SCREEN = 0x13;
+    public const PLAY_CONTAINER_PROPERTY = 0x15;
+    public const PLAY_DELETE_ENTITY = 0x3F;
+    public const PLAY_CHANGE_GAME_MODE = 0x1B;
+    public const PLAY_SET_COOLDOWN = 0x45;
+    public const PLAY_CUSTOM_PAYLOAD = 0x17;
+    public const PLAY_STOP_SOUND = 0x54;
+    public const PLAY_CLEAR_TITLES = 0x59;
+    public const PLAY_REMOVE_RESOURCE_PACK = 0x4E;
 
     private function __construct()
     {

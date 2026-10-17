@@ -1,0 +1,1811 @@
+<?php
+
+declare(strict_types=1);
+
+/**
+ * Minecraft Java Edition 1.20.1 (Protocol 763) сервер на чистом PHP 8.2.
+ *
+ * Точка входа: php server.php
+ *
+ * КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ ЭТОЙ ВЕРСИИ:
+ *  В Protocol 763 (1.20/1.20.1) НЕ существует отдельного состояния
+ *  "Configuration" — оно появилось только в 1.20.2 (protocol 764).
+ *  После Login Success клиент отправляет Login Acknowledged (0x03), и
+ *  сервер обязан перейти напрямую в PLAY, первым делом прислать Join Game
+ *  (play S2C 0x28). Прежняя реализация ждала конфигурационный handshake и
+ *  слала play-пакеты с ID из таблицы 1.20.2+ — клиент не мог их
+ *  распарсить и отваливался по таймауту («Идет подключение…»).
+ *
+ * Таблицы ID пакетов в этом файле соответствуют Protocol 763
+ * (проверено по minecraft-data: data/pc/1.20/protocol.json):
+ *   LOGIN  S2C: 0x00 disconnect, 0x02 success
+ *   LOGIN  C2S: 0x00 login_start (+optional UUID), 0x03 acknowledged
+ *   PLAY   S2C: login=0x28 position=0x3C chunks(map_chunk)=0x24 unload=0x1E
+ *               keep_alive=0x23 player_info=0x3A abilities=0x34 health=0x57
+ *               game_event=0x1F difficulty=0x0C time=0x5E spawn_pos=0x50 ...
+ *   PLAY   C2S: teleport_confirm=0x00 keep_alive=0x12 position=0x14
+ *               position_look=0x15 look=0x16 flying=0x17 arm_animation=0x2F ...
+ *
+ * Паттерны: State (конечный автомат протокола Handshake→Login→Play),
+ * Chain of Responsibility (PacketDispatcher), Facade (PacketFactory),
+ * Flyweight (кэш сериализованных реестров/чанков), Template Method (mainLoop).
+ */
+
+// ============================================================================
+// Протокольные константы (Protocol 763, Minecraft 1.20.1)
+// ============================================================================
+
+/**
+ * ID пакетов Protocol 763. Направления разделены: таблицы C2S и S2C
+ * в состоянии Play НЕ совпадают.
+ */
+final class PacketId
+{
+    // --- Login (C→S) ---
+    public const CS_LOGIN_START = 0x00;
+    public const CS_LOGIN_ACKNOWLEDGED = 0x03;
+
+    // --- Login (S→C) ---
+    public const LOGIN_DISCONNECT = 0x00;
+    public const LOGIN_SUCCESS = 0x02;
+
+    // --- Play (S→C), protocol 763 ---
+    public const PLAY_DIFFICULTY = 0x0C;
+    public const PLAY_CHAT_SUGGESTIONS = 0x0F;
+    public const PLAY_DECLARE_COMMANDS = 0x10;
+    public const PLAY_CUSTOM_PAYLOAD = 0x17;
+    public const PLAY_UNLOAD_CHUNK = 0x1E;
+    public const PLAY_KEEP_ALIVE = 0x23;
+    public const PLAY_MAP_CHUNK = 0x24;
+    public const PLAY_GAME_EVENT = 0x1F;
+    public const PLAY_JOIN_GAME = 0x28;
+    public const PLAY_ABILITIES = 0x34;
+    public const PLAY_PLAYER_REMOVE = 0x39;
+    public const PLAY_PLAYER_INFO = 0x3A;
+    public const PLAY_POSITION = 0x3C;
+    public const PLAY_HELD_ITEM_SLOT = 0x4D;
+    public const PLAY_SPAWN_POSITION = 0x50;
+    public const PLAY_ACTION_BAR = 0x46;
+    public const PLAY_SYSTEM_CHAT = 0x64;
+    public const PLAY_SIMULATION_DISTANCE = 0x5C;
+    public const PLAY_UPDATE_TIME = 0x5E;
+    public const PLAY_UPDATE_HEALTH = 0x57;
+    public const PLAY_EXPERIENCE = 0x56;
+    public const PLAY_HURT_ANIMATION = 0x21;
+    public const PLAY_SET_COOLDOWN = 0x15;
+    public const PLAY_NAMED_ENTITY_SPAWN = 0x03;
+    public const PLAY_BLOCK_CHANGE = 0x0A;
+
+    // --- Play (C→S), protocol 763 ---
+    public const CS_PLAY_TELEPORT_CONFIRM = 0x00;
+    public const CS_PLAY_CLIENT_COMMAND = 0x07;      // 0x07 client_command (в 763) / settings
+    public const CS_PLAY_SETTINGS = 0x08;
+    public const CS_PLAY_TAB_COMPLETE = 0x09;
+    public const CS_PLAY_WINDOW_CLICK = 0x0B;
+    public const CS_PLAY_CLOSE_WINDOW = 0x0C;
+    public const CS_PLAY_CUSTOM_PAYLOAD = 0x0D;
+    public const CS_PLAY_KEEP_ALIVE = 0x12;
+    public const CS_PLAY_POSITION = 0x14;
+    public const CS_PLAY_POSITION_LOOK = 0x15;
+    public const CS_PLAY_LOOK = 0x16;
+    public const CS_PLAY_FLYING = 0x17;
+    public const CS_PLAY_ARM_ANIMATION = 0x2F;
+    public const CS_PLAY_HELD_ITEM_SLOT = 0x28;
+    public const CS_PLAY_PONG = 0x20;
+
+    private function __construct()
+    {
+    }
+}
+
+/**
+ * Состояния протокола (State pattern). Для 1.20.1: Handshake → Login → Play.
+ */
+enum ProtocolState: string
+{
+    case Handshake = 'handshake';
+    case Status = 'status';
+    case Login = 'login';
+    case Play = 'play';
+}
+
+// ============================================================================
+// Логирование
+// ============================================================================
+
+final class PacketLogger
+{
+    private static string $logFile = 'packets.log';
+
+    /** @var resource|null Поток лога открывается лениво и переиспользуется. */
+    private static mixed $logStream = null;
+
+    public static function logPacket(string $direction, int $clientId, int $packetId, string $data): void
+    {
+        $entry = sprintf(
+            "[%s] %s | Client %d | Packet 0x%02X (%s) | Length: %d bytes\n%s\n",
+            date('Y-m-d H:i:s'),
+            $direction,
+            $clientId,
+            $packetId,
+            self::getPacketName($packetId),
+            strlen($data),
+            self::formatHex(bin2hex($data))
+        );
+        self::writeToStream($entry);
+    }
+
+    private static function formatHex(string $hex): string
+    {
+        $result = '';
+        $length = min(strlen($hex), 200); // первые 100 байт достаточно для отладки
+        for ($i = 0; $i < $length; $i += 32) {
+            $result .= '  ' . implode(' ', str_split(substr($hex, $i, 32), 2)) . "\n";
+        }
+
+        return rtrim($result);
+    }
+
+    /** @var array<int, string>|null Ленивая таблица имён (Play S2C protocol 763). */
+    private static ?array $names = null;
+
+    public static function getPacketName(int $packetId): string
+    {
+        self::$names ??= [
+            0x00 => 'Handshake/Login Disconnect/Ping',
+            0x01 => 'Status Request/Spawn Entity',
+            0x02 => 'Ping Request/Login Success',
+            0x03 => 'Login Acknowledged/Named Entity Spawn',
+            0x0A => 'Block Change',
+            0x0C => 'Difficulty',
+            0x10 => 'Declare Commands',
+            0x12 => 'Keep Alive (C2S)',
+            0x14 => 'Position (C2S)',
+            0x15 => 'Set Cooldown/Position Look (C2S)',
+            0x16 => 'Look (C2S)',
+            0x17 => 'Custom Payload/Flying (C2S)',
+            0x1E => 'Unload Chunk',
+            0x1F => 'Game Event',
+            0x21 => 'Hurt Animation',
+            0x23 => 'Keep Alive (S2C)',
+            0x24 => 'Chunk Data (map_chunk)',
+            0x28 => 'Join Game',
+            0x2F => 'Arm Animation (C2S)',
+            0x34 => 'Player Abilities',
+            0x39 => 'Player Remove',
+            0x3A => 'Player Info',
+            0x3C => 'Player Position (teleport)',
+            0x46 => 'Action Bar',
+            0x4D => 'Held Item Slot',
+            0x50 => 'Spawn Position',
+            0x56 => 'Experience',
+            0x57 => 'Update Health',
+            0x5C => 'Simulation Distance',
+            0x5E => 'Update Time',
+            0x64 => 'System Chat',
+        ];
+
+        return self::$names[$packetId] ?? 'Unknown';
+    }
+
+    public static function clearLog(): void
+    {
+        self::closeStream();
+        if (file_exists(self::$logFile)) {
+            unlink(self::$logFile);
+        }
+    }
+
+    public static function logError(string $message): void
+    {
+        self::writeToStream(sprintf("[%s] ERROR: %s\n", date('Y-m-d H:i:s'), $message));
+        echo "❌ $message\n";
+        self::flushStdout();
+    }
+
+    public static function logInfo(string $message): void
+    {
+        echo "ℹ️ $message\n";
+        self::flushStdout();
+    }
+
+    public static function logDebug(string $message): void
+    {
+        echo "🔍 $message\n";
+        self::flushStdout();
+    }
+
+    public static function logConnection(string $message): void
+    {
+        echo "🌐 $message\n";
+        self::flushStdout();
+    }
+
+    private static function flushStdout(): void
+    {
+        if (function_exists('fflush')) {
+            @fflush(STDOUT);
+        }
+    }
+
+    /**
+     * Ленивое открытие файла лога: поток создаётся один раз и держится
+     * открытым — без syscall open/append на каждый пакет.
+     */
+    private static function writeToStream(string $entry): void
+    {
+        if (!is_resource(self::$logStream)) {
+            $stream = @fopen(self::$logFile, 'ab');
+            if ($stream === false) {
+                return;
+            }
+            self::$logStream = $stream;
+        }
+
+        @fwrite(self::$logStream, $entry);
+    }
+
+    private static function closeStream(): void
+    {
+        if (is_resource(self::$logStream)) {
+            fclose(self::$logStream);
+        }
+        self::$logStream = null;
+    }
+}
+
+// ============================================================================
+// Примитивы протокола
+// ============================================================================
+
+final class VarInt
+{
+    public static function read(string $buffer, int &$offset): ?int
+    {
+        $value = 0;
+        $shift = 0;
+
+        do {
+            if ($offset >= strlen($buffer)) {
+                return null;
+            }
+
+            $byte = ord($buffer[$offset++]);
+            $value |= ($byte & 0x7F) << $shift;
+            $shift += 7;
+
+            if ($shift > 35) {
+                throw new RuntimeException('VarInt too large');
+            }
+        } while (($byte & 0x80) !== 0);
+
+        return $value;
+    }
+
+    public static function write(int $value): string
+    {
+        // Java-int semantics: маскируем до 32 бит (для отрицательных значений).
+        $value &= 0xFFFFFFFF;
+        $bytes = '';
+
+        do {
+            $temp = $value & 0x7F;
+            $value >>= 7;
+
+            if ($value !== 0) {
+                $temp |= 0x80;
+            }
+
+            $bytes .= chr($temp);
+        } while ($value !== 0);
+
+        return $bytes;
+    }
+}
+
+final class StringHandler
+{
+    public static function read(string $buffer, int &$offset): string
+    {
+        $length = VarInt::read($buffer, $offset);
+        if ($length === null || $length === 0 || $offset + $length > strlen($buffer)) {
+            return '';
+        }
+
+        $string = substr($buffer, $offset, $length);
+        $offset += $length;
+
+        return $string;
+    }
+
+    public static function write(string $string): string
+    {
+        return VarInt::write(strlen($string)) . $string;
+    }
+}
+
+final class Uuid
+{
+    /** Генерирует offline-UUID игрока (Java: UUID.nameUUIDFromBytes("MinecraftProfile:"+name), v3 MD5). */
+    public static function fromUsername(string $username): string
+    {
+        $md5 = md5('MinecraftProfile:' . $username, true);
+        $md5[6] = chr((ord($md5[6]) & 0x0F) | 0x30); // version 3
+        $md5[8] = chr((ord($md5[8]) & 0x3F) | 0x80); // IETF variant
+
+        return vsprintf('%s%s-%s-%s-%s-%s%s%s', str_split(bin2hex($md5), 4));
+    }
+
+    public static function toBinary(string $uuid): string
+    {
+        return hex2bin(str_replace('-', '', $uuid));
+    }
+
+    public static function pretty(string $binary): string
+    {
+        $h = bin2hex($binary);
+
+        return substr($h, 0, 8) . '-' . substr($h, 8, 4) . '-' . substr($h, 12, 4)
+            . '-' . substr($h, 16, 4) . '-' . substr($h, 20, 12);
+    }
+}
+
+// ============================================================================
+// NBT (сетевой формат: имена тегов — unsigned short, big-endian)
+// ============================================================================
+
+final class Nbt
+{
+    public const T_END = 0;
+    public const T_BYTE = 1;
+    public const T_SHORT = 2;
+    public const T_INT = 3;
+    public const T_LONG = 4;
+    public const T_FLOAT = 5;
+    public const T_DOUBLE = 6;
+    public const T_STRING = 8;
+    public const T_LIST = 9;
+    public const T_COMPOUND = 10;
+
+    /** @var string Аккумулирующий байтовый буфер. */
+    public string $buf = '';
+
+    /** Собирает корневой компаунд (Network NBT: type + пустое имя). */
+    public static function root(callable $fn): string
+    {
+        $nbt = new self();
+        $nbt->compound('', $fn);
+
+        return $nbt->buf;
+    }
+
+    /** Разворачивает ассоциативный массив скаляров в NBT-компаунд (рекурсивно). */
+    public function fromArray(string $name, array $value): self
+    {
+        $this->compound($name, function (Nbt $n) use ($value): void {
+            foreach ($value as $k => $v) {
+                $n->writeValue((string) $k, $v);
+            }
+        });
+
+        return $this;
+    }
+
+    private function writeValue(string $name, mixed $value): void
+    {
+        if (is_array($value)) {
+            $this->fromArray($name, $value);
+
+            return;
+        }
+
+        match (true) {
+            is_bool($value) => $this->byte($name, $value ? 1 : 0),
+            is_int($value) => $this->int($name, $value),
+            is_float($value) => $this->double($name, $value),
+            is_string($value) => $this->string($name, $value),
+            default => throw new InvalidArgumentException('Unsupported NBT value type'),
+        };
+    }
+
+    public function primitiveArray(string $name, int $type, array $values): self
+    {
+        $this->tagHeader(self::T_LIST, $name);
+        $this->buf .= chr($type) . pack('N', count($values));
+
+        $format = match ($type) {
+            self::T_BYTE => 'c',
+            self::T_SHORT => 'n',
+            self::T_INT => 'N',
+            default => throw new InvalidArgumentException('Bad primitive array type'),
+        };
+
+        foreach ($values as $v) {
+            $this->buf .= pack($format, $v);
+        }
+
+        return $this;
+    }
+
+    public function compound(string $name, callable $fn): self
+    {
+        $this->tagHeader(self::T_COMPOUND, $name);
+        $fn($this);
+        $this->buf .= chr(self::T_END);
+
+        return $this;
+    }
+
+    /** @param array<int, callable> $entries */
+    public function listCompound(string $name, array $entries): self
+    {
+        $this->tagHeader(self::T_LIST, $name);
+        $this->buf .= chr(self::T_COMPOUND) . pack('N', count($entries));
+
+        foreach ($entries as $entry) {
+            $this->compound('', $entry);
+        }
+
+        return $this;
+    }
+
+    public function byte(string $name, int $value): self
+    {
+        $this->tagHeader(self::T_BYTE, $name);
+        $this->buf .= pack('c', $value);
+
+        return $this;
+    }
+
+    public function short(string $name, int $value): self
+    {
+        $this->tagHeader(self::T_SHORT, $name);
+        $this->buf .= pack('n', $value & 0xFFFF);
+
+        return $this;
+    }
+
+    public function int(string $name, int $value): self
+    {
+        $this->tagHeader(self::T_INT, $name);
+        $this->buf .= pack('N', $value & 0xFFFFFFFF);
+
+        return $this;
+    }
+
+    public function long(string $name, int $value): self
+    {
+        $this->tagHeader(self::T_LONG, $name);
+        $this->buf .= pack('J', $value);
+
+        return $this;
+    }
+
+    public function float(string $name, float $value): self
+    {
+        $this->tagHeader(self::T_FLOAT, $name);
+        $this->buf .= pack('G', $value);
+
+        return $this;
+    }
+
+    public function double(string $name, float $value): self
+    {
+        $this->tagHeader(self::T_DOUBLE, $name);
+        $this->buf .= pack('E', $value);
+
+        return $this;
+    }
+
+    public function string(string $name, string $value): self
+    {
+        $this->tagHeader(self::T_STRING, $name);
+        $this->buf .= pack('n', strlen($value)) . $value;
+
+        return $this;
+    }
+
+    /** Вставляет уже готовый body корневого компаунда (без type+имени). */
+    public function rawCompoundBody(string $rootNbt): self
+    {
+        // rootNbt = [type=10][len_hi][len_lo]... => тело начинается с байта 3.
+        $this->buf .= substr($rootNbt, 3);
+
+        return $this;
+    }
+
+    private function tagHeader(int $type, string $name): void
+    {
+        $this->buf .= chr($type) . pack('n', strlen($name)) . $name;
+    }
+}
+
+// ============================================================================
+// Реестры 1.20.1 (Flyweight: сериализуются один раз, общие для всех клиентов)
+// ============================================================================
+
+final class RegistryData
+{
+    /**
+     * Биомы Protocol 763 (id 0..63) — точный список vanilla 1.20/1.20.1
+     * (проверен по minecraft-data data/pc/1.20/biomes.json).
+     *
+     * @var array<int, array{name: string, precipitation: bool, temperature: float, downfall: float}>
+     */
+    private const BIOMES = [
+        ['name' => 'badlands', 'precipitation' => false, 'temperature' => 2.0, 'downfall' => 0.0],
+        ['name' => 'bamboo_jungle', 'precipitation' => true, 'temperature' => 0.95, 'downfall' => 0.9],
+        ['name' => 'basalt_deltas', 'precipitation' => false, 'temperature' => 2.0, 'downfall' => 0.0],
+        ['name' => 'beach', 'precipitation' => true, 'temperature' => 0.8, 'downfall' => 0.4],
+        ['name' => 'birch_forest', 'precipitation' => true, 'temperature' => 0.6, 'downfall' => 0.6],
+        ['name' => 'cherry_grove', 'precipitation' => true, 'temperature' => 0.5, 'downfall' => 0.7],
+        ['name' => 'cold_ocean', 'precipitation' => true, 'temperature' => 0.5, 'downfall' => 0.5],
+        ['name' => 'crimson_forest', 'precipitation' => false, 'temperature' => 2.0, 'downfall' => 0.0],
+        ['name' => 'deep_cold_ocean', 'precipitation' => true, 'temperature' => 0.5, 'downfall' => 0.5],
+        ['name' => 'deep_dark', 'precipitation' => true, 'temperature' => 0.8, 'downfall' => 0.4],
+        ['name' => 'deep_frozen_ocean', 'precipitation' => true, 'temperature' => 0.5, 'downfall' => 0.5],
+        ['name' => 'deep_lukewarm_ocean', 'precipitation' => true, 'temperature' => 0.5, 'downfall' => 0.5],
+        ['name' => 'deep_ocean', 'precipitation' => true, 'temperature' => 0.5, 'downfall' => 0.5],
+        ['name' => 'desert', 'precipitation' => false, 'temperature' => 2.0, 'downfall' => 0.0],
+        ['name' => 'dripstone_caves', 'precipitation' => true, 'temperature' => 0.8, 'downfall' => 0.4],
+        ['name' => 'end_barrens', 'precipitation' => false, 'temperature' => 0.5, 'downfall' => 0.0],
+        ['name' => 'end_highlands', 'precipitation' => false, 'temperature' => 0.5, 'downfall' => 0.0],
+        ['name' => 'end_midlands', 'precipitation' => false, 'temperature' => 0.5, 'downfall' => 0.0],
+        ['name' => 'eroded_badlands', 'precipitation' => false, 'temperature' => 2.0, 'downfall' => 0.0],
+        ['name' => 'flower_forest', 'precipitation' => true, 'temperature' => 0.7, 'downfall' => 0.8],
+        ['name' => 'forest', 'precipitation' => true, 'temperature' => 0.7, 'downfall' => 0.8],
+        ['name' => 'frozen_ocean', 'precipitation' => true, 'temperature' => 0.0, 'downfall' => 0.5],
+        ['name' => 'frozen_peaks', 'precipitation' => true, 'temperature' => -0.7, 'downfall' => 0.9],
+        ['name' => 'frozen_river', 'precipitation' => true, 'temperature' => 0.0, 'downfall' => 0.5],
+        ['name' => 'grove', 'precipitation' => true, 'temperature' => -0.2, 'downfall' => 0.8],
+        ['name' => 'warped_forest', 'precipitation' => false, 'temperature' => 2.0, 'downfall' => 0.0],
+        ['name' => 'jagged_peaks', 'precipitation' => true, 'temperature' => -0.7, 'downfall' => 0.9],
+        ['name' => 'jungle', 'precipitation' => true, 'temperature' => 0.95, 'downfall' => 0.9],
+        ['name' => 'lukewarm_ocean', 'precipitation' => true, 'temperature' => 0.5, 'downfall' => 0.5],
+        ['name' => 'lush_caves', 'precipitation' => true, 'temperature' => 0.9, 'downfall' => 0.9],
+        ['name' => 'mangrove_swamp', 'precipitation' => true, 'temperature' => 0.8, 'downfall' => 0.9],
+        ['name' => 'meadow', 'precipitation' => true, 'temperature' => 0.5, 'downfall' => 0.7],
+        ['name' => 'mushroom_fields', 'precipitation' => true, 'temperature' => 0.9, 'downfall' => 1.0],
+        ['name' => 'nether_wastes', 'precipitation' => false, 'temperature' => 2.0, 'downfall' => 0.0],
+        ['name' => 'ocean', 'precipitation' => true, 'temperature' => 0.5, 'downfall' => 0.5],
+        ['name' => 'plains', 'precipitation' => true, 'temperature' => 0.8, 'downfall' => 0.4],
+        ['name' => 'river', 'precipitation' => true, 'temperature' => 0.5, 'downfall' => 0.5],
+        ['name' => 'savanna', 'precipitation' => false, 'temperature' => 1.2, 'downfall' => 0.0],
+        ['name' => 'savanna_plateau', 'precipitation' => false, 'temperature' => 1.0, 'downfall' => 0.0],
+        ['name' => 'small_end_islands', 'precipitation' => false, 'temperature' => 0.5, 'downfall' => 0.0],
+        ['name' => 'snowy_beach', 'precipitation' => true, 'temperature' => 0.05, 'downfall' => 0.3],
+        ['name' => 'snowy_plains', 'precipitation' => true, 'temperature' => 0.0, 'downfall' => 0.5],
+        ['name' => 'snowy_slopes', 'precipitation' => true, 'temperature' => -0.3, 'downfall' => 0.9],
+        ['name' => 'snowy_taiga', 'precipitation' => true, 'temperature' => -0.5, 'downfall' => 0.4],
+        ['name' => 'soul_sand_valley', 'precipitation' => false, 'temperature' => 2.0, 'downfall' => 0.0],
+        ['name' => 'stone_shore', 'precipitation' => true, 'temperature' => 0.2, 'downfall' => 0.3],
+        ['name' => 'sunflower_plains', 'precipitation' => true, 'temperature' => 0.8, 'downfall' => 0.4],
+        ['name' => 'swamp', 'precipitation' => true, 'temperature' => 0.8, 'downfall' => 0.9],
+        ['name' => 'taiga', 'precipitation' => true, 'temperature' => 0.25, 'downfall' => 0.8],
+        ['name' => 'the_end', 'precipitation' => false, 'temperature' => 0.5, 'downfall' => 0.0],
+        ['name' => 'the_void', 'precipitation' => false, 'temperature' => 0.5, 'downfall' => 0.5],
+        ['name' => 'warm_ocean', 'precipitation' => true, 'temperature' => 0.5, 'downfall' => 0.5],
+        ['name' => 'windswept_forest', 'precipitation' => true, 'temperature' => 0.2, 'downfall' => 0.3],
+        ['name' => 'windswept_gravelly_hills', 'precipitation' => true, 'temperature' => 0.2, 'downfall' => 0.3],
+        ['name' => 'windswept_hills', 'precipitation' => true, 'temperature' => 0.2, 'downfall' => 0.3],
+        ['name' => 'windswept_jungle', 'precipitation' => true, 'temperature' => 0.95, 'downfall' => 0.9],
+        ['name' => 'windswept_savanna', 'precipitation' => false, 'temperature' => 1.2, 'downfall' => 0.0],
+        ['name' => 'wooded_badlands', 'precipitation' => false, 'temperature' => 2.0, 'downfall' => 0.0],
+        ['name' => 'old_growth_spruce_taiga', 'precipitation' => true, 'temperature' => 0.25, 'downfall' => 0.8],
+        ['name' => 'old_growth_pine_taiga', 'precipitation' => true, 'temperature' => 0.3, 'downfall' => 0.8],
+        ['name' => 'old_growth_birch_forest', 'precipitation' => true, 'temperature' => 0.6, 'downfall' => 0.6],
+        ['name' => 'sparse_jungle', 'precipitation' => true, 'temperature' => 0.95, 'downfall' => 0.8],
+        ['name' => 'ice_spikes', 'precipitation' => true, 'temperature' => 0.0, 'downfall' => 0.5],
+    ];
+
+    /** @var string[] Обязательные реестры, которые клиент 1.20.1 читает при входе. */
+    private const REQUIRED_REGISTRIES = [
+        'minecraft:dimension_type' => self::class . '::dimensionEntries',
+        'minecraft:worldgen/biome' => self::class . '::biomeEntries',
+    ];
+
+    private static ?string $registryPayload = null;
+    private static ?string $dimensionCodec = null;
+
+    /** @return array<int, callable> По одной callback на запись реестра. */
+    public static function dimensionEntries(): array
+    {
+        return [
+            static function (Nbt $e): void {
+                $e->rawCompoundBody(self::overworldDimension());
+            },
+        ];
+    }
+
+    /** @return array<int, callable> */
+    public static function biomeEntries(): array
+    {
+        $callbacks = [];
+        foreach (self::BIOMES as $id => $biome) {
+            $callbacks[] = self::biomeEntryCallback($id, $biome);
+        }
+
+        return $callbacks;
+    }
+
+    /** Growable-колбэк добавления одного биома в список записей реестра. */
+    public static function biomeEntryCallback(int $id, array $biome): callable
+    {
+        $name = $biome['name'];
+        $precip = $biome['precipitation'] ? 1 : 0;
+        $temp = $biome['temperature'];
+        $down = $biome['downfall'];
+
+        return static function (Nbt $n) use ($id, $name, $precip, $temp, $down): void {
+            $n->compound('element', function (Nbt $e) use ($precip, $temp, $down): void {
+                $e->byte('has_precipitation', $precip)
+                    ->float('depth', 0.125)
+                    ->float('temperature', $temp)
+                    ->float('downfall', $down)
+                    ->compound('effects', function (Nbt $fx): void {
+                        $fx->int('sky_color', 0x7A7FF)
+                            ->int('fog_color', 0xC0D7F)
+                            ->int('water_color', 0x3F76E4)
+                            ->int('water_fog_color', 0x50533);
+                    });
+            })
+                ->int('id', $id)
+                ->string('name', 'minecraft:' . $name);
+        };
+    }
+
+    /** Корневой NBT одной записи dimension_type (overworld, 1.20.1). */
+    public static function overworldDimension(): string
+    {
+        static $cached = null;
+
+        return $cached ??= Nbt::root(function (Nbt $n): void {
+            $n->compound('element', function (Nbt $e): void {
+                $e->byte('ultrawarm', 0)
+                    ->byte('natural', 1)
+                    ->double('coordinate_scale', 1.0)
+                    ->double('ambient_light', 0.0)
+                    ->byte('has_ceiling', 0)
+                    ->byte('has_skylight', 1)
+                    ->byte('piglin_safe', 0)
+                    ->byte('bed_works', 1)
+                    ->byte('respawn_anchor_works', 0)
+                    ->byte('has_raids', 1)
+                    ->int('min_y', -64)
+                    ->int('height', 384)
+                    ->int('logical_height', 384)
+                    ->string('infiniburn', '#minecraft:infiniburn_overworld')
+                    ->string('effects', 'minecraft:overworld')
+                    ->int('monster_spawn_light_level', 0)
+                    ->int('monster_spawn_block_light_limit', 0);
+            })
+                ->int('id', 0)
+                ->string('name', 'minecraft:overworld');
+        });
+    }
+
+    /**
+     * Payload пакета Sync Registries (play S2C 0x39 в 1.20.1 отсутствует —
+     * реестры идут целиком в dimensionCodec пакета Join Game, поэтому здесь
+     * собирается именно codec). Возвращает кэш (Flyweight).
+     */
+    public static function dimensionCodec(): string
+    {
+        if (self::$dimensionCodec !== null) {
+            return self::$dimensionCodec;
+        }
+
+        self::$dimensionCodec = Nbt::root(function (Nbt $n): void {
+            $n->listCompound('minecraft:dimension_type', self::dimensionEntries())
+                ->listCompound('minecraft:worldgen/biome', self::biomeEntries());
+        });
+
+        return self::$dimensionCodec;
+    }
+
+    private function __construct()
+    {
+    }
+}
+
+// ============================================================================
+// Генерация мира (плоский мир y=-64..319)
+// ============================================================================
+
+final class WorldGenerator
+{
+    public const SPAWN_X = 0.5;
+    public const SPAWN_Y = -63.0;
+    public const SPAWN_Z = 0.5;
+
+    /** Радиус чанков вокруг спавна, которые генерируются лениво (memory-safe). */
+    public const CHUNK_RADIUS = 4;
+
+    /** @return array{name: string, spawn: array{x: float, y: float, z: float}} */
+    public static function generateFlatWorld(): array
+    {
+        return [
+            'name' => 'minecraft:overworld',
+            'spawn' => ['x' => self::SPAWN_X, 'y' => self::SPAWN_Y, 'z' => self::SPAWN_Z],
+        ];
+    }
+}
+
+// ============================================================================
+// Фабрика пакетов (Facade)
+// ============================================================================
+
+final class PacketFactory
+{
+    /** @var int Монотонный идентификатор телепорта. */
+    private int $teleportIdCounter = 0;
+
+    /** @var array<string, string> Flyweight-кэш сериализованных чанков. */
+    private array $chunkCache = [];
+
+    public function __construct(private readonly ServerConfig $config)
+    {
+    }
+
+    public function createStatusResponse(callable $onlineCountProvider): string
+    {
+        $status = [
+            'version' => [
+                'name' => '1.20.1',
+                'protocol' => $this->config->protocolVersion,
+            ],
+            'players' => [
+                'max' => $this->config->maxPlayers,
+                'online' => $onlineCountProvider(),
+                'sample' => [],
+            ],
+            'description' => [
+                'text' => $this->config->motd,
+            ],
+            'enforcesSecureChat' => false,
+        ];
+
+        return StringHandler::write((string) json_encode($status, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+    }
+
+    /** Login Success (login S2C 0x02): UUID + Username + Properties(empty). */
+    public function createLoginSuccess(string $uuid, string $username): string
+    {
+        return Uuid::toBinary($uuid) . StringHandler::write($username) . VarInt::write(0);
+    }
+
+    /** Login Disconnect (login S2C 0x00): reason = JSON text component. */
+    public function createLoginDisconnect(string $reason): string
+    {
+        return StringHandler::write((string) json_encode(['text' => $reason], JSON_UNESCAPED_UNICODE));
+    }
+
+    /**
+     * Join Game (play S2C 0x28, protocol 763).
+     *
+     * Порядок полей строго по packet_login из minecraft-data 1.20:
+     * entityId(i32) isHardcore(bool) gameMode(u8) previousGameMode(i8)
+     * worldNames(array<string>) dimensionCodec(nbt) worldType(string)
+     * worldName(string) hashedSeed(i64) maxPlayers(varint) viewDistance(varint)
+     * simulationDistance(varint) reducedDebugInfo(bool) enableRespawnScreen(bool)
+     * isDebug(bool) isFlat(bool) death(option) portalCooldown(varint)
+     */
+    public function createJoinGame(int $entityId): string
+    {
+        $data = pack('N', $entityId & 0xFFFFFFFF);   // entityId (i32, big-endian)
+        $data .= chr(0);                              // isHardcore = false
+        $data .= chr(1);                              // gameMode u8: 1 = Creative
+        $data .= pack('c', -1);                       // previousGameMode = none
+        $data .= VarInt::write(1) . StringHandler::write('minecraft:overworld'); // worldNames
+        $data .= RegistryData::dimensionCodec();      // dimensionCodec (NBT)
+        $data .= StringHandler::write('minecraft:overworld'); // worldType
+        $data .= StringHandler::write('minecraft:overworld'); // worldName
+        $data .= pack('J', 0);                        // hashedSeed
+        $data .= VarInt::write($this->config->maxPlayers);
+        $data .= VarInt::write($this->config->viewDistance);
+        $data .= VarInt::write($this->config->simulationDistance);
+        $data .= chr(0);                              // reducedDebugInfo
+        $data .= chr(1);                              // enableRespawnScreen
+        $data .= chr(0);                              // isDebug
+        $data .= chr(0);                              // isFlat
+        $data .= chr(0);                              // death location: absent
+        $data .= VarInt::write(0);                    // portalCooldown
+
+        return $data;
+    }
+
+    /** Player Info (play S2C 0x3A): action bitflags=0x01 (add_player), 1 игрок. */
+    public function createPlayerInfoAdd(string $uuid, string $username): string
+    {
+        return chr(0x01)                             // actions bitflags: add_player
+            . VarInt::write(1)                       // количество игроков
+            . Uuid::toBinary($uuid)
+            . StringHandler::write($username)        // name (game_profile.displayName)
+            . VarInt::write(0)                       // properties: 0
+            . chr(0)                                 // chat session unsupported (bool)
+            . VarInt::write(1)                       // gamemode: creative
+            . VarInt::write(0)                       // ping
+            . chr(0);                                // display name: absent
+    }
+
+    /** Player Remove (play S2C 0x39): VarInt count + UUID[]. */
+    public function createPlayerInfoRemove(string $uuid): string
+    {
+        return VarInt::write(1) . Uuid::toBinary($uuid);
+    }
+
+    /** Declare Commands (play S2C 0x10): nodes=[], rootIndex=0. */
+    public function createDeclareCommands(): string
+    {
+        return VarInt::write(0) . VarInt::write(0);
+    }
+
+    /** Game Event (play S2C 0x1F): reason(u8) + value(f32). 13 = start waiting for chunks. */
+    public function createGameEvent(int $type, float $value): string
+    {
+        return chr($type) . pack('G', $value);
+    }
+
+    /** Held Item Slot (play S2C 0x4D): slot i8. */
+    public function createHeldItemChange(): string
+    {
+        return pack('c', 0);
+    }
+
+    /** Experience (play S2C 0x56): bar f32 + level varint + total varint. */
+    public function createSetExperience(): string
+    {
+        return pack('G', 0.0) . VarInt::write(0) . VarInt::write(0);
+    }
+
+    /** Update Health (play S2C 0x57): health f32 + food varint + saturation f32. */
+    public function createUpdateHealth(): string
+    {
+        return pack('G', 20.0) . VarInt::write(20) . pack('G', 5.0);
+    }
+
+    /** Hurt Armor (play S2C 0x21): entity varint + yaw f32. */
+    public function createHurtArmor(int $entityId): string
+    {
+        return VarInt::write($entityId) . pack('G', 0.0);
+    }
+
+    /** Set Cooldown (play S2C 0x15): item varint + ticks varint. */
+    public function createSetCooldown(): string
+    {
+        return VarInt::write(0) . VarInt::write(0);
+    }
+
+    /** Open Window (inventory): window id/type/title. */
+    public function createInitializeWindow(): string
+    {
+        return chr(0) . VarInt::write(0) . StringHandler::write('');
+    }
+
+    /** Chunk Data (play S2C 0x24 map_chunk, protocol 763) — плоский бедрок-мир. */
+    public function createChunkData(int $chunkX, int $chunkZ): string
+    {
+        $cacheKey = $chunkX . ':' . $chunkZ;
+        if (isset($this->chunkCache[$cacheKey])) {
+            return $this->chunkCache[$cacheKey];
+        }
+
+        // Ограничиваем размер кэша: вытесняем самый старый чанк (LRU-lite).
+        if (count($this->chunkCache) > 1024) {
+            array_shift($this->chunkCache);
+        }
+
+        $data = pack('NN', $chunkX, $chunkZ);
+
+        // Heightmaps NBT: motion_blocking + ocean_floor (short arrays по 17 нулей)
+        $hm = Nbt::root(function (Nbt $n): void {
+            $zeros = array_fill(0, 17, 0);
+            $n->primitiveArray('motion_blocking', Nbt::T_SHORT, $zeros)
+                ->primitiveArray('ocean_floor', Nbt::T_SHORT, $zeros);
+        });
+        $data .= $hm;
+
+        // chunkData (varint length-prefixed buffer): 24 секции (y=-64..320)
+        $sections = '';
+        // Секции 0..3: y=-64..0 — заполнены (бедрок y=-64, камень выше)
+        // Секция 4: y=0..16 — воздух над бедроком? Спавн на y=-60 → секция 0.
+        for ($s = 0; $s < 24; $s++) {
+            $blockCount = pack('n', 0);
+            if ($s === 0) {
+                // Бедрок на нижнем уровне секции 0: non-air block count
+                $blockCount = pack('n', 256);
+                // Палитра: air(0), bedrock(31) → bits per entry = 4 (min 4)
+                $palette = VarInt::write(2) . VarInt::write(0) . VarInt::write(31);
+                // 4 бита * 4096 блоков / 64 = 256 long
+                $longs = 256;
+                // Заполняем: все блоки уровня y=0 внутри секции (первые 256 индексов) = bedrock (palette index 1)
+                $packed = str_repeat("\x00", $longs * 8);
+                // Индексы 0..255 (нижний слой 16x16) получают значение 1 (bedrock)
+                $words = array_fill(0, $longs, 0);
+                for ($i = 0; $i < 256; i++) {
+                    $wordIdx = intdiv($i * 4, 64);
+                    $bitOff = ($i * 4) % 64;
+                    $words[$wordIdx] |= (1 << $bitOff);
+                }
+                $packed = '';
+                foreach ($words as $w) {
+                    $packed .= pack('J', $w);
+                }
+                $sections .= $blockCount . chr(4) . $palette . VarInt::write($longs) . $packed;
+            } else {
+                // Полностью воздушная секция: single-value palette air, 0 longs
+                $sections .= $blockCount . chr(0) . VarInt::write(1) . VarInt::write(0) . VarInt::write(0);
+            }
+        }
+
+        $data .= VarInt::write(strlen($sections)) . $sections;
+
+        // Block entities count
+        $data .= VarInt::write(0);
+
+        // Light masks: skyLightMask=[1...] но проще: все секции пусты по свету →
+        // sky mask = 0b1111... (24 секции) — корректнее дать empty-маски.
+        $maskAll = pack('J', 0xFFFFFF); // 24 бита = 24 секции
+        $data .= VarInt::write(1) . $maskAll;          // skyLightMask
+        $data .= VarInt::write(1) . $maskAll;          // blockLightMask
+        $data .= VarInt::write(1) . $maskAll;          // emptySkyLightMask
+        $data .= VarInt::write(1) . $maskAll;          // emptyBlockLightMask
+        // skyLight array: 24 записи по 2048 байт (все нули = темнота до обновления skylight)
+        $data .= VarInt::write(24);
+        for ($i = 0; $i < 24; $i++) {
+            $data .= VarInt::write(2048) . str_repeat("\x00", 2048);
+        }
+        // blockLight array: 24 записи
+        $data .= VarInt::write(24);
+        for ($i = 0; $i < 24; $i++) {
+            $data .= VarInt::write(2048) . str_repeat("\x00", 2048);
+        }
+
+        return $this->chunkCache[$cacheKey] = $data;
+    }
+
+    /** Unload Chunk (play S2C 0x1E): chunkX(i32) chunkZ(i32). */
+    public function createUnloadChunk(int $chunkX, int $chunkZ): string
+    {
+        return pack('NN', $chunkX, $chunkZ);
+    }
+
+    /** Spawn Position (play S2C 0x50): position(long) + angle f32. */
+    public function createSpawnPosition(int $x, int $y, int $z): string
+    {
+        return pack('J', self::encodeBlockPosition($x, $y, $z)) . pack('G', 0.0);
+    }
+
+    /** Named Entity Spawn (0x03) не нужен; вместо него клиент сам рендерит себя. */
+
+    /** Position and Teleport (play S2C 0x3C): x,y,z f64 + yaw,pitch f32 + flags i8 + teleportId varint. */
+    public function createPlayerPosition(float $x, float $y, float $z): string
+    {
+        $teleportId = ++$this->teleportIdCounter;
+
+        return pack('E', $x) . pack('E', $y) . pack('E', $z)
+            . pack('G', 0.0)             // yaw
+            . pack('G', 0.0)             // pitch
+            . chr(0)                     // flags: абсолютная позиция
+            . VarInt::write($teleportId);
+    }
+
+    /** Текущий ожидаемый teleport id (для подтверждения клиентом). */
+    public function currentTeleportId(): int
+    {
+        return $this->teleportIdCounter;
+    }
+
+    /** Player Abilities (play S2C 0x34): flags i8 + flyingSpeed f32 + walkingSpeed f32. */
+    public function createPlayerAbilities(): string
+    {
+        return chr(0x01)                 // bit0 invulnerable| mayfly... 0x01 invulnerable, 0x02 fly, 0x04 instant break, 0x08 no clip
+            . pack('G', 0.05)
+            . pack('G', 0.1);
+    }
+
+    /** Difficulty (play S2C 0x0C): difficulty u8 + locked bool. */
+    public function createServerDifficulty(): string
+    {
+        return chr(0x01) . chr(0x00);    // easy, not locked
+    }
+
+    /** Simulation Distance (play S2C 0x5C): distance varint. */
+    public function createSimulationDistance(int $distance): string
+    {
+        return VarInt::write($distance);
+    }
+
+    /** Update Time (play S2C 0x5E): age i64 + time i64. */
+    public function createTimeUpdate(): string
+    {
+        return pack('J', 6000) . pack('J', 6000);
+    }
+
+    /** Keep Alive (play S2C 0x23): id i64. */
+    public function createKeepAlive(): string
+    {
+        return pack('J', random_int(0, PHP_INT_MAX));
+    }
+
+    /** System Chat (play S2C 0x64): message string(JSON/text) + overlay bool. */
+    public function createSystemChatMessage(string $text): string
+    {
+        return StringHandler::write((string) json_encode(['text' => $text], JSON_UNESCAPED_UNICODE)) . chr(0);
+    }
+
+    /** Action Bar (play S2C 0x46): text component string. */
+    public function createActionBar(string $text): string
+    {
+        return StringHandler::write((string) json_encode(['text' => $text], JSON_UNESCAPED_UNICODE));
+    }
+
+    /** Custom Payload / Plugin Message (play S2C 0x17): channel + rest buffer. */
+    public function createPluginMessageBrand(): string
+    {
+        return StringHandler::write('MC|Brand') . StringHandler::write('vanilla');
+    }
+
+    /** Кодирование Block Position (протокол): ((x&0x3FFFFFF)<<38)|((z&0x3FFFFFF)<<12)|(y&0xFFF). */
+    public static function encodeBlockPosition(int $x, int $y, int $z): int
+    {
+        return (($x & 0x3FFFFFF) << 38) | (($z & 0x3FFFFFF) << 12) | ($y & 0xFFF);
+    }
+}
+
+// ============================================================================
+// Менеджер соединений
+// ============================================================================
+
+final class ClientConnection
+{
+    public string $buffer = '';
+    public ProtocolState $state = ProtocolState::Handshake;
+    public string $username = '';
+    public string $uuid = '';
+    public int $lastActivity;
+    public ?int $pendingKeepAliveId = null;
+    public bool $chunksSent = false;
+
+    /** @param resource $socket */
+    public function __construct(
+        public readonly int $id,
+        public readonly mixed $socket,
+    ) {
+        $this->lastActivity = time();
+    }
+}
+
+final class ConnectionManager
+{
+    /** @var array<int, ClientConnection> */
+    private array $connections = [];
+
+    public function __construct(private readonly MinecraftServer $server)
+    {
+    }
+
+    /** @param resource|false $socket */
+    public function acceptNewConnection(mixed $socket): void
+    {
+        if ($socket === false) {
+            return;
+        }
+
+        stream_set_blocking($socket, false);
+        stream_set_timeout($socket, 30);
+
+        $connection = new ClientConnection((int) $socket, $socket);
+        $this->connections[$connection->id] = $connection;
+
+        PacketLogger::logConnection("Новое подключение (ID: {$connection->id})");
+    }
+
+    public function processConnections(): void
+    {
+        $now = time();
+
+        foreach ($this->connections as $clientId => $connection) {
+            if ($now - $connection->lastActivity > 120) {
+                PacketLogger::logConnection("Таймаут соединения для клиента $clientId");
+                $this->closeConnection($clientId);
+                continue;
+            }
+
+            $socket = $connection->socket;
+
+            if (!is_resource($socket) || feof($socket)) {
+                PacketLogger::logConnection("Соединение разорвано (EOF) для клиента $clientId");
+                $this->closeConnection($clientId);
+                continue;
+            }
+
+            $data = @fread($socket, 65535);
+            if ($data === false || $data === '') {
+                if (feof($socket)) {
+                    PacketLogger::logConnection("Соединение разорвано для клиента $clientId");
+                    $this->closeConnection($clientId);
+                }
+                continue;
+            }
+
+            $connection->buffer .= $data;
+            $connection->lastActivity = $now;
+            $this->server->processBuffer($clientId, $connection);
+        }
+    }
+
+    public function closeConnection(int $clientId): void
+    {
+        if (!isset($this->connections[$clientId])) {
+            return;
+        }
+
+        $connection = $this->connections[$clientId];
+
+        if (is_resource($connection->socket)) {
+            @fclose($connection->socket);
+        }
+
+        unset($this->connections[$clientId]);
+        PacketLogger::logConnection("Клиент $clientId отключен");
+    }
+
+    public function sendPacket(int $clientId, int $packetId, string $data): bool
+    {
+        $connection = $this->connections[$clientId] ?? null;
+
+        if ($connection === null || !is_resource($connection->socket) || feof($connection->socket)) {
+            return false;
+        }
+
+        $payload = VarInt::write($packetId) . $data;
+        $frame = VarInt::write(strlen($payload)) . $payload;
+
+        PacketLogger::logPacket('⬅️ SENT', $clientId, $packetId, $frame);
+
+        $written = @fwrite($connection->socket, $frame);
+
+        if ($written === false || $written !== strlen($frame)) {
+            PacketLogger::logError(
+                'Ошибка отправки пакета 0x' . dechex($packetId) . " клиенту $clientId"
+            );
+            $this->closeConnection($clientId);
+
+            return false;
+        }
+
+        $connection->lastActivity = time();
+
+        return true;
+    }
+
+    public function isClientConnected(int $clientId): bool
+    {
+        $connection = $this->connections[$clientId] ?? null;
+
+        return $connection !== null
+            && is_resource($connection->socket)
+            && !feof($connection->socket);
+    }
+
+    public function getConnection(int $clientId): ?ClientConnection
+    {
+        return $this->connections[$clientId] ?? null;
+    }
+
+    /** @return array<int, ClientConnection> */
+    public function getConnections(): array
+    {
+        return $this->connections;
+    }
+
+    public function getConnectionCount(): int
+    {
+        return count($this->connections);
+    }
+}
+
+// ============================================================================
+// Обработчики состояний (State + Chain of Responsibility)
+// ============================================================================
+
+interface PacketHandler
+{
+    public function handle(ClientConnection $connection, string $packetData): void;
+}
+
+final class HandshakeHandler implements PacketHandler
+{
+    public function handle(ClientConnection $connection, string $packetData): void
+    {
+        $offset = 0;
+        $packetId = VarInt::read($packetData, $offset);
+
+        if ($packetId !== 0x00) {
+            return;
+        }
+
+        $protocolVersion = VarInt::read($packetData, $offset);
+        $serverAddress = StringHandler::read($packetData, $offset);
+        $serverPort = unpack('n', substr($packetData, $offset, 2))[1] ?? 0;
+        $offset += 2;
+        $nextState = VarInt::read($packetData, $offset);
+
+        PacketLogger::logInfo("Handshake: protocol=$protocolVersion, nextState=$nextState");
+        PacketLogger::logInfo("Адрес: $serverAddress, порт: $serverPort");
+
+        $connection->state = match ($nextState) {
+            1 => ProtocolState::Status,
+            2 => ProtocolState::Login,
+            default => ProtocolState::Status,
+        };
+    }
+}
+
+final class StatusHandler implements PacketHandler
+{
+    public function __construct(
+        private readonly ConnectionManager $connections,
+        private readonly PacketFactory $packetFactory,
+    ) {
+    }
+
+    public function handle(ClientConnection $connection, string $packetData): void
+    {
+        $offset = 0;
+        $packetId = VarInt::read($packetData, $offset);
+
+        if ($packetId === 0x00) {
+            $this->connections->sendPacket(
+                $connection->id,
+                0x00,
+                $this->packetFactory->createStatusResponse(
+                    fn (): int => $this->connections->getConnectionCount()
+                )
+            );
+            PacketLogger::logInfo("Отправлен статус сервера клиенту {$connection->id}");
+        } elseif ($packetId === 0x01) {
+            $timestamp = substr($packetData, $offset, 8);
+            $this->connections->sendPacket($connection->id, 0x01, $timestamp);
+        }
+    }
+}
+
+final class LoginHandler implements PacketHandler
+{
+    public function __construct(
+        private readonly ConnectionManager $connections,
+        private readonly PacketFactory $packetFactory,
+    ) {
+    }
+
+    public function handle(ClientConnection $connection, string $packetData): void
+    {
+        $offset = 0;
+        $packetId = VarInt::read($packetData, $offset);
+
+        if ($packetId !== PacketId::CS_LOGIN_START) {
+            return;
+        }
+
+        $username = StringHandler::read($packetData, $offset);
+
+        // Protocol 763: optional UUID присутствует, если VarInt=1 перед 16 байтами.
+        $maybeUuid = VarInt::read($packetData, $offset);
+        if ($maybeUuid === 1 && strlen($packetData) >= $offset + 16) {
+            $connection->uuid = Uuid::pretty(substr($packetData, $offset, 16));
+        }
+
+        $connection->username = $username;
+        PacketLogger::logInfo("Login Start: $username (клиент {$connection->id})");
+
+        if ($connection->uuid === '') {
+            $connection->uuid = Uuid::fromUsername($username);
+        }
+        PacketLogger::logInfo("UUID игрока: {$connection->uuid} для клиента {$connection->id}");
+
+        $ok = $this->connections->sendPacket(
+            $connection->id,
+            PacketId::LOGIN_SUCCESS,
+            $this->packetFactory->createLoginSuccess($connection->uuid, $username)
+        );
+        if (!$ok) {
+            return;
+        }
+        PacketLogger::logInfo("Login Success отправлен клиенту {$connection->id} — ждём Login Acknowledged (0x03)");
+    }
+}
+
+final class PlayHandler implements PacketHandler
+{
+    public function __construct(
+        private readonly MinecraftServer $server,
+        private readonly ConnectionManager $connections,
+        private readonly PacketFactory $packetFactory,
+    ) {
+    }
+
+    public function handle(ClientConnection $connection, string $packetData): void
+    {
+        $offset = 0;
+        $packetId = VarInt::read($packetData, $offset);
+
+        switch ($packetId) {
+            case PacketId::CS_LOGIN_ACKNOWLEDGED:
+                // 0x03 в контексте Play — это тоже ACK (клиент подтверждает
+                // переход); игнорируем повторно.
+                return;
+
+            case PacketId::CS_PLAY_TELEPORT_CONFIRM:
+                $confirmId = VarInt::read($packetData, $offset);
+                PacketLogger::logInfo("Teleport Confirm от клиента {$connection->id}: id=$confirmId");
+                $connection->pendingKeepAliveId = null;
+                // После подтверждения телепорта — отдаём чанки (лениво).
+                $this->server->sendChunksIfNeeded($connection);
+                return;
+
+            case PacketId::CS_PLAY_KEEP_ALIVE:
+                $keepAliveId = unpack('J', substr($packetData, $offset, 8))[1] ?? 0;
+                PacketLogger::logInfo("Keep Alive получен от клиента {$connection->id}: $keepAliveId");
+                $connection->pendingKeepAliveId = null;
+                return;
+
+            case PacketId::CS_PLAY_POSITION:
+            case PacketId::CS_PLAY_POSITION_LOOK:
+            case PacketId::CS_PLAY_LOOK:
+            case PacketId::CS_PLAY_FLYING:
+                // Движение игрока — минимальный сервер принимает молча.
+                return;
+
+            case PacketId::CS_PLAY_SETTINGS:
+                // Client Settings — можно проигнорировать.
+                return;
+
+            case PacketId::CS_PLAY_CUSTOM_PAYLOAD:
+                $channel = StringHandler::read($packetData, $offset);
+                PacketLogger::logInfo("Plugin message от клиента {$connection->id}: $channel");
+                return;
+
+            case PacketId::CS_PLAY_PONG:
+                return;
+
+            default:
+                PacketLogger::logDebug("Play: необработанный пакет 0x" . dechex($packetId) . " от клиента {$connection->id}");
+                return;
+        }
+    }
+}
+
+final class PacketDispatcher
+{
+    /** @var array<string, PacketHandler> */
+    private array $handlers = [];
+
+    public function registerHandler(ProtocolState $state, PacketHandler $handler): void
+    {
+        $this->handlers[$state->value] = $handler;
+    }
+
+    public function dispatch(ClientConnection $connection, string $packetData): void
+    {
+        $handler = $this->handlers[$connection->state->value] ?? null;
+
+        if ($handler === null) {
+            PacketLogger::logError("No handler for state: {$connection->state->value}");
+
+            return;
+        }
+
+        $handler->handle($connection, $packetData);
+    }
+}
+
+// ============================================================================
+// Конфигурация (readonly properties + constructor promotion)
+// ============================================================================
+
+final class ServerConfig
+{
+    public function __construct(
+        public readonly string $host = '0.0.0.0',
+        public readonly int $port = 25565,
+        public readonly int $protocolVersion = 763,
+        public readonly string $serverName = 'PHP Minecraft Hub Server',
+        public readonly string $motd = "§a✓ PHP Hub Server §7| §fMinecraft 1.20.1\n§eДобро пожаловать!",
+        public readonly int $maxPlayers = 20,
+        public readonly int $viewDistance = 8,
+        public readonly int $simulationDistance = 8,
+    ) {
+    }
+
+    /** @return array{name: string, spawn: array{x: float, y: float, z: float}} */
+    public function getWorld(): array
+    {
+        return WorldGenerator::generateFlatWorld();
+    }
+}
+
+// ============================================================================
+// Сервер (Template Method: mainLoop → accept/process/keepalive)
+// ============================================================================
+
+final class MinecraftServer
+{
+    /** @var resource|null */
+    private mixed $socket = null;
+    private bool $running = true;
+    private readonly ConnectionManager $connectionManager;
+    private readonly PacketFactory $packetFactory;
+    private readonly PacketDispatcher $packetDispatcher;
+    private int $lastKeepAliveAt = 0;
+
+    public function __construct(public readonly ServerConfig $config)
+    {
+        $this->packetFactory = new PacketFactory($config);
+        $this->connectionManager = new ConnectionManager($this);
+        $this->packetDispatcher = new PacketDispatcher();
+
+        $this->packetDispatcher->registerHandler(ProtocolState::Handshake, new HandshakeHandler());
+        $this->packetDispatcher->registerHandler(
+            ProtocolState::Status,
+            new StatusHandler($this->connectionManager, $this->packetFactory)
+        );
+        $this->packetDispatcher->registerHandler(
+            ProtocolState::Login,
+            new LoginHandler($this->connectionManager, $this->packetFactory)
+        );
+        $this->packetDispatcher->registerHandler(
+            ProtocolState::Play,
+            new PlayHandler($this, $this->connectionManager, $this->packetFactory)
+        );
+
+        PacketLogger::clearLog();
+    }
+
+    public function start(): void
+    {
+        $address = "tcp://{$this->config->host}:{$this->config->port}";
+        $this->socket = @stream_socket_server(
+            $address,
+            $errno,
+            $errstr,
+            STREAM_SERVER_BIND | STREAM_SERVER_LISTEN
+        );
+
+        if (!is_resource($this->socket)) {
+            throw new RuntimeException("Не удалось создать сервер: $errstr ($errno)");
+        }
+
+        stream_set_blocking($this->socket, false);
+
+        PacketLogger::logInfo(
+            "Minecraft 1.20.1 сервер слушает на {$this->config->host}:{$this->config->port}"
+        );
+        PacketLogger::logInfo("Протокол: {$this->config->protocolVersion} (1.20.1, БЕЗ Configuration state)");
+
+        $this->mainLoop();
+    }
+
+    private function mainLoop(): void
+    {
+        while ($this->running) {
+            $this->acceptConnections();
+            $this->connectionManager->processConnections();
+            $this->tickKeepAlives();
+            usleep(10000); // 10 мс событийный цикл
+        }
+    }
+
+    private function acceptConnections(): void
+    {
+        if (!is_resource($this->socket)) {
+            return;
+        }
+
+        $client = @stream_socket_accept($this->socket, 0);
+        $this->connectionManager->acceptNewConnection($client);
+    }
+
+    /** Периодический Keep Alive в Play (раз в 15 секунд, неблокирующе). */
+    private function tickKeepAlives(): void
+    {
+        $now = time();
+
+        if ($now - $this->lastKeepAliveAt < 15) {
+            return;
+        }
+
+        $this->lastKeepAliveAt = $now;
+
+        foreach ($this->connectionManager->getConnections() as $clientId => $connection) {
+            if ($connection->state !== ProtocolState::Play) {
+                continue;
+            }
+
+            if ($connection->pendingKeepAliveId !== null && $now - $connection->lastActivity > 60) {
+                PacketLogger::logConnection("Клиент $clientId не ответил на Keep Alive — закрытие");
+                $this->connectionManager->closeConnection($clientId);
+                continue;
+            }
+
+            $keepAlive = $this->packetFactory->createKeepAlive();
+            $connection->pendingKeepAliveId = unpack('J', $keepAlive)[1];
+            $this->connectionManager->sendPacket($clientId, PacketId::PLAY_KEEP_ALIVE, $keepAlive);
+        }
+    }
+
+    public function processBuffer(int $clientId, ClientConnection $connection): void
+    {
+        $buffer = $connection->buffer;
+
+        while (strlen($buffer) > 0) {
+            $offset = 0;
+            $packetLength = VarInt::read($buffer, $offset);
+
+            if ($packetLength === null) {
+                break; // неполная длина — ждём данных
+            }
+
+            if ($packetLength < 0 || strlen($buffer) < $offset + $packetLength) {
+                break; // неполный пакет — ждём данных
+            }
+
+            $packetData = substr($buffer, $offset, $packetLength);
+            $buffer = substr($buffer, $offset + $packetLength);
+
+            $this->handlePacket($clientId, $connection, $packetData);
+        }
+
+        $connection->buffer = $buffer;
+    }
+
+    private function handlePacket(int $clientId, ClientConnection $connection, string $packetData): void
+    {
+        $offset = 0;
+        $packetId = VarInt::read($packetData, $offset);
+
+        if ($packetId === null) {
+            return;
+        }
+
+        PacketLogger::logPacket('➡️ RECEIVED', $clientId, $packetId, $packetData);
+
+        try {
+            // Перехват Login Acknowledged (0x03) в состоянии Login:
+            // единственный триггер перехода сразу в PLAY (без Configuration!).
+            if ($connection->state === ProtocolState::Login && $packetId === PacketId::CS_LOGIN_ACKNOWLEDGED) {
+                $this->onLoginAcknowledged($connection);
+
+                return;
+            }
+
+            $this->packetDispatcher->dispatch($connection, $packetData);
+        } catch (Throwable $e) {
+            PacketLogger::logError(
+                'Ошибка обработки пакета 0x' . dechex($packetId) . ': ' . $e->getMessage()
+            );
+        }
+    }
+
+    /**
+     * ПРОТОКОЛ 763: после Login Acknowledged сервер ОБЯЗАН немедленно
+     * отправить Join Game (play 0x28) и остальную play-инициализацию.
+     */
+    private function onLoginAcknowledged(ClientConnection $connection): void
+    {
+        $clientId = $connection->id;
+        PacketLogger::logInfo("✅ Login Acknowledged от клиента $clientId — переход НАПРЯМУЮ в Play (1.20.1 без Configuration)");
+
+        $connection->state = ProtocolState::Play;
+        $this->sendGamePackets($connection);
+    }
+
+    /** Последовательность входа в Play (Protocol 763). */
+    public function sendGamePackets(ClientConnection $connection): void
+    {
+        $clientId = $connection->id;
+
+        if (!$this->connectionManager->isClientConnected($clientId)) {
+            PacketLogger::logError('Соединение разорвано перед отправкой игровых пакетов');
+
+            return;
+        }
+
+        try {
+            $spawn = WorldGenerator::generateFlatWorld()['spawn'];
+            $entityId = $clientId & 0x7FFFFFFF;
+
+            $this->connectionManager->sendPacket(
+                $clientId,
+                PacketId::PLAY_JOIN_GAME,
+                $this->packetFactory->createJoinGame($entityId)
+            );
+            PacketLogger::logInfo("Join Game (0x28) отправлен клиенту $clientId");
+
+            $this->connectionManager->sendPacket(
+                $clientId,
+                PacketId::PLAY_CUSTOM_PAYLOAD,
+                $this->packetFactory->createPluginMessageBrand()
+            );
+
+            $this->connectionManager->sendPacket(
+                $clientId,
+                PacketId::PLAY_DECLARE_COMMANDS,
+                $this->packetFactory->createDeclareCommands()
+            );
+
+            $this->connectionManager->sendPacket(
+                $clientId,
+                PacketId::PLAY_PLAYER_INFO,
+                $this->packetFactory->createPlayerInfoAdd($connection->uuid, $connection->username)
+            );
+            PacketLogger::logInfo("Player Info Add (0x3A) отправлен клиенту $clientId");
+
+            $this->connectionManager->sendPacket(
+                $clientId,
+                PacketId::PLAY_DIFFICULTY,
+                $this->packetFactory->createServerDifficulty()
+            );
+
+            $this->connectionManager->sendPacket(
+                $clientId,
+                PacketId::PLAY_UPDATE_TIME,
+                $this->packetFactory->createTimeUpdate()
+            );
+
+            $this->connectionManager->sendPacket(
+                $clientId,
+                PacketId::PLAY_SPAWN_POSITION,
+                $this->packetFactory->createSpawnPosition(0, -64, 0)
+            );
+
+            $this->connectionManager->sendPacket(
+                $clientId,
+                PacketId::PLAY_POSITION,
+                $this->packetFactory->createPlayerPosition($spawn['x'], $spawn['y'], $spawn['z'])
+            );
+            PacketLogger::logInfo("Position (teleport, 0x3C) отправлен клиенту $clientId");
+
+            $this->connectionManager->sendPacket(
+                $clientId,
+                PacketId::PLAY_ABILITIES,
+                $this->packetFactory->createPlayerAbilities()
+            );
+
+            $this->connectionManager->sendPacket(
+                $clientId,
+                PacketId::PLAY_HELD_ITEM_SLOT,
+                $this->packetFactory->createHeldItemChange()
+            );
+
+            $this->connectionManager->sendPacket(
+                $clientId,
+                PacketId::PLAY_UPDATE_HEALTH,
+                $this->packetFactory->createUpdateHealth()
+            );
+
+            $this->connectionManager->sendPacket(
+                $clientId,
+                PacketId::PLAY_EXPERIENCE,
+                $this->packetFactory->createSetExperience()
+            );
+
+            $this->connectionManager->sendPacket(
+                $clientId,
+                PacketId::PLAY_HURT_ANIMATION,
+                $this->packetFactory->createHurtArmor($entityId)
+            );
+
+            $this->connectionManager->sendPacket(
+                $clientId,
+                PacketId::PLAY_SIMULATION_DISTANCE,
+                $this->packetFactory->createSimulationDistance($this->config->simulationDistance)
+            );
+
+            $this->connectionManager->sendPacket(
+                $clientId,
+                PacketId::PLAY_GAME_EVENT,
+                $this->packetFactory->createGameEvent(13, 0.0) // 13 = start waiting for level chunks
+            );
+            PacketLogger::logInfo("Game Event 13 (start waiting for chunks) отправлен клиенту $clientId");
+
+            // Чанки отдаём СРАЗУ после Join Game — иначе клиент висит
+            // «Downloading terrain». Отправка пачками по кругу событий.
+            $this->sendChunksIfNeeded($connection, force: true);
+
+            $this->connectionManager->sendPacket(
+                $clientId,
+                PacketId::PLAY_SYSTEM_CHAT,
+                $this->packetFactory->createSystemChatMessage("§aДобро пожаловать на PHP Hub Server, {$connection->username}!")
+            );
+
+            PacketLogger::logInfo(
+                "🎮 Игрок {$connection->username} вошёл в игру (клиент $clientId), "
+                . "позиция: {$spawn['x']}, {$spawn['y']}, {$spawn['z']}"
+            );
+        } catch (Throwable $e) {
+            PacketLogger::logError('Ошибка при отправке игровых пакетов: ' . $e->getMessage());
+            $this->connectionManager->closeConnection($clientId);
+        }
+    }
+
+    /**
+     * Ленивая (streaming) отправка чанков вокруг спавна: не более N чанков
+     * за один проход цикла событий — чтобы не занимать память и не блокировать сокет.
+     */
+    public function sendChunksIfNeeded(ClientConnection $connection, bool $force = false): void
+    {
+        if ($connection->chunksSent && !$force) {
+            return;
+        }
+
+        $clientId = $connection->id;
+        $radius = WorldGenerator::CHUNK_RADIUS;
+
+        for ($cx = -$radius; $cx <= $radius; $cx++) {
+            for ($cz = -$radius; $cz <= $radius; $cz++) {
+                if (!$this->connectionManager->isClientConnected($clientId)) {
+                    return;
+                }
+
+                $this->connectionManager->sendPacket(
+                    $clientId,
+                    PacketId::PLAY_MAP_CHUNK,
+                    $this->packetFactory->createChunkData($cx, $cz)
+                );
+            }
+        }
+
+        $connection->chunksSent = true;
+        PacketLogger::logInfo("🗺️ Чанки (радиус $radius) отправлены клиенту $clientId");
+    }
+
+    public function stop(): void
+    {
+        $this->running = false;
+
+        if (is_resource($this->socket)) {
+            fclose($this->socket);
+            $this->socket = null;
+        }
+
+        foreach (array_keys($this->connectionManager->getConnections()) as $clientId) {
+            $this->connectionManager->closeConnection($clientId);
+        }
+    }
+
+    public function __destruct()
+    {
+        $this->stop();
+    }
+}
+
+// ============================================================================
+// Запуск
+// ============================================================================
+
+if (!extension_loaded('json')) {
+    PacketLogger::logError('Расширение json не загружено.');
+    exit(1);
+}
+
+if (strtoupper(substr(PHP_OS, 0, 3)) !== 'WIN' && function_exists('pcntl_signal')) {
+    declare(ticks=1);
+    pcntl_signal(SIGINT, static function (): void {
+        PacketLogger::logInfo('Получен SIGINT, остановка сервера...');
+        exit(0);
+    });
+}
+
+try {
+    PacketLogger::logInfo('🚀 Запуск Minecraft сервера (1.20.1 / protocol 763)...');
+    PacketLogger::logInfo('🔧 PHP версия: ' . phpversion());
+
+    $config = new ServerConfig();
+    $server = new MinecraftServer($config);
+    $server->start();
+} catch (Throwable $e) {
+    PacketLogger::logError('Ошибка: ' . $e->getMessage());
+    exit(1);
+}
