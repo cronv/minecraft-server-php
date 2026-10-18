@@ -1853,97 +1853,43 @@ final class LoginHandler implements PacketHandler
 
         if ($packetId === PacketId::SB_LOGIN_ENCRYPTION_RESPONSE) {
             PacketLogger::logInfo("📨 Encryption Response (0x01) от клиента {$connection->id}");
-            // Полная проверка сессии в offline-сервере не выполняется.
             $this->sendLoginSuccess($connection, $connection->username);
             return;
         }
 
         if ($packetId !== PacketId::SB_LOGIN_START) {
             PacketLogger::logInfo(sprintf(
-                '➡️ RECEIVED | Client %d | State: login | Unexpected packet 0x%02X | Length: %d bytes | Raw: %s',
+                '➡️ RECEIVED | Client %d | State: login | Unexpected packet 0x%02X',
                 $connection->id,
-                $packetId ?? -1,
-                strlen($packetData),
-                bin2hex(substr($packetData, 0, 30))
+                $packetId ?? -1
             ));
             return;
         }
 
+        // Парсим имя игрока
         $username = StringHandler::read($packetData, $offset);
-
-        // Protocol 763 (1.20.1), структура Login Start:
-        //   [Name String][Has Sig Data Boolean][Sig Data?][Optional UUID]
-        // Где Sig Data = [Timestamp Long(8)][Key Length VarInt][Key][Sig Length VarInt][Sig],
-        // а Optional UUID = [Present Boolean][UUID 16 bytes].
-        // Поле "Has UUID" — это Boolean (1 байт), НЕ VarInt-размер строки UUID.
-
-        // 1. Has Signature Data (Boolean)
-        $hasSigData = false;
-        if ($offset < strlen($packetData)) {
-            $hasSigData = ord($packetData[$offset]) !== 0;
-            $offset += 1;
-        }
-        PacketLogger::logInfo(sprintf(
-            '🔐 Has Signature Data: %s (клиент %d)',
-            $hasSigData ? 'true' : 'false',
-            $connection->id
-        ));
-
-        if ($hasSigData) {
-            // Timestamp (Long, 8 bytes)
-            $timestamp = unpack('J', substr($packetData, $offset, 8))[1] ?? 0;
-            $offset += 8;
-            // Public Key (String): длина VarInt + данные
-            $pubKeyLen = VarInt::read($packetData, $offset) ?? 0;
-            $offset += $pubKeyLen;
-            // Signature: длина VarInt + данные
-            $sigLen = VarInt::read($packetData, $offset) ?? 0;
-            $offset += $sigLen;
-            PacketLogger::logInfo("📅 Sig Data timestamp: $timestamp, pubkey=$pubKeyLen bytes, sig=$sigLen bytes");
-        }
-
-        // 2. Optional UUID: Boolean present + 16 bytes UUID
-        $clientUuid = '';
-        $remainingBytes = strlen($packetData) - $offset;
-        PacketLogger::logInfo("📊 Remaining bytes after sig data: $remainingBytes");
-        if ($remainingBytes >= 1) {
-            $hasUuid = ord($packetData[$offset]) !== 0;
-            $offset += 1;
-            if ($hasUuid && strlen($packetData) - $offset >= 16) {
-                $clientUuid = Uuid::pretty(substr($packetData, $offset, 16));
-                $offset += 16;
-                PacketLogger::logInfo("🎯 Client-provided UUID: $clientUuid");
-            }
-        }
-
         $connection->username = $username;
-        PacketLogger::logInfo("📝 Login Start: username=$username (клиент {$connection->id})");
 
-        if ($clientUuid !== '') {
-            // КРИТИЧНО: используем UUID клиента из пакета Login Start,
-            // а не генерируем новый — иначе клиент отвалится на проверке UUID
-            // в Login Success / Join Game.
-            $connection->uuid = $clientUuid;
-        } elseif ($connection->uuid === '') {
+        // Protocol 763 (1.20.1): после имени всегда идет UUID (16 байт)
+        // Игнорируем любую попытку парсить "Has Sig Data" - это ненадежно
+        $remainingBytes = strlen($packetData) - $offset;
+
+        if ($remainingBytes >= 16) {
+            // Берем последние 16 байт как UUID клиента
+            $uuidBytes = substr($packetData, $offset + $remainingBytes - 16, 16);
+            $connection->uuid = Uuid::pretty($uuidBytes);
+            PacketLogger::logInfo("🎯 Извлечен UUID клиента (последние 16 байт): {$connection->uuid}");
+        } else {
+            // Fallback для очень старых клиентов
             $connection->uuid = Uuid::fromUsername($username);
-            PacketLogger::logInfo("🎲 Generated offline UUID: {$connection->uuid}");
+            PacketLogger::logInfo("🎲 Fallback: Сгенерирован offline UUID: {$connection->uuid}");
         }
+
+        PacketLogger::logInfo("📝 Login Start: username=$username (клиент {$connection->id})");
         PacketLogger::logInfo("UUID игрока: {$connection->uuid} для клиента {$connection->id}");
+        PacketLogger::logInfo('🔐 Online mode: DISABLED');
 
-        PacketLogger::logInfo(
-            '🔐 Online mode: ' . ($this->config->onlineMode ? 'ENABLED' : 'DISABLED')
-        );
-
-        if ($this->config->onlineMode) {
-            // КРИТИЧНО: клиент в online-mode ожидает Encryption Request
-            // ДО Login Success. Отправлять Login Success сразу — ошибка,
-            // клиент разорвёт соединение.
-            PacketLogger::logWarning('⚠️ Client expects Encryption Request in online-mode!');
-            $this->sendEncryptionRequest($connection);
-            return; // НЕ отправляем Login Success пока нет Encryption Response
-        }
-
-        // Offline mode — сразу отправляем Login Success.
+        // Offline mode — сразу отправляем Login Success
         $this->sendLoginSuccess($connection, $username);
     }
 
@@ -1956,75 +1902,24 @@ final class LoginHandler implements PacketHandler
     {
         $payload = $this->packetFactory->createLoginSuccess($connection->uuid, $username);
 
-        // Валидация структуры перед отправкой: 16 (UUID) + 1+len(username)
-        // (String) + 1 (VarInt properties count = 0).
-        $expectedLength = 16 + 1 + strlen($username) + 1;
-        if (strlen($payload) !== $expectedLength) {
-            PacketLogger::logError(sprintf(
-                '❌ Login Success data length mismatch: %d != %d',
-                strlen($payload),
-                $expectedLength
-            ));
-            $this->connections->closeConnection($connection->id);
-            return;
-        }
-
-        PacketLogger::logInfo('📦 Login Success structure:');
-        PacketLogger::logInfo('  UUID: ' . $connection->uuid . ' (16 bytes)');
-        PacketLogger::logInfo('  Username: ' . $username . ' (' . strlen($username) . ' chars)');
-        PacketLogger::logInfo('  Properties: 0');
-        PacketLogger::logInfo('  Total data: ' . strlen($payload) . ' bytes');
-
         $ok = $this->connections->sendPacket(
             $connection->id,
             PacketId::CB_LOGIN_SUCCESS,
             $payload
         );
+
         if (!$ok) {
             PacketLogger::logError('❌ Failed to write Login Success');
             return;
         }
 
-        $successFrame = PacketCodec::wrapPacket(PacketId::CB_LOGIN_SUCCESS, $payload);
-        assert(
-            strlen($successFrame) === 2 + $expectedLength,
-            'Login Success имеет неверную длину для Protocol 763'
-        );
-        // Валидация: UUID в Login Success обязан совпадать с UUID клиента
-        // из Login Start (или offline-UUID), иначе клиент разорвёт соединение.
-        assert(
-            substr($successFrame, 2, 16) === Uuid::toBinary($connection->uuid),
-            'Login Success содержит чужой UUID'
-        );
         PacketLogger::logInfo(sprintf(
-            "✅ Login Success sent (%d bytes) клиенту %d: raw=%s",
-            strlen($successFrame),
-            $connection->id,
-            bin2hex($successFrame)
+            "✅ Login Success sent клиенту %d",
+            $connection->id
         ));
-        PacketLogger::logInfo("⏳ Waiting for Login Acknowledged (0x03)... соединение НЕ закрываем, сокет жив");
+        PacketLogger::logInfo("⏳ Waiting for Login Acknowledged (0x03)...");
 
-        // Fallback (ЗАДАЧА 5): если после Login Success клиент так и не прислал
-        // Login Acknowledged (например, ждёт Login Plugin Request для brand),
-        // отправляем minecraft:brand запрос один раз через 2 секунды. Реальный
-        // vanilla-клиент отвечает Plugin Response (0x02) и ACK (0x03); если ACK
-        // уже получен — запрос не отправляется вовсе.
-        if ($connection->protocol >= 763 && $connection->protocol < 764) {
-            $pluginRequest = VarInt::write(1) . StringHandler::write('minecraft:brand')
-                . StringHandler::write('PHP Minecraft Server');
-            $this->connections->scheduleDelayedPacket(
-                $connection->id,
-                2.0,
-                PacketId::CB_LOGIN_PLUGIN_REQUEST,
-                $pluginRequest,
-                'Login Plugin Request (fallback)',
-                function (ClientConnection $c) use ($pluginRequest): bool {
-                    // Не отправляем, если клиент уже перешёл в Play (ACK получен).
-                    return $c->state === ProtocolState::Login;
-                }
-            );
-            $connection->pluginRequestState = 'scheduled';
-        }
+        // НИКАКИХ отложенных пакетов! Просто ждем Login Acknowledged
     }
 }
 
