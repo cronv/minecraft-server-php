@@ -25,7 +25,8 @@ final class JoinGameBuilder
     }
 
     /**
-     * Body of packet 0x26 Join Game (protocol 763 / 1.20.1).
+     * Body of packet 0x29 Join Game (Login) — protocol 763 / 1.20.1.
+     * (ВНИМАНИЕ: 0x27 в Protocol 763 — это Set Container Content, а НЕ Join Game!)
      */
     public function build(string $dimensionName = 'minecraft:overworld'): string
     {

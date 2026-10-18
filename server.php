@@ -145,11 +145,13 @@ final class PacketId
     public const CB_PLAY_LEVEL_EVENT = 0x24;
     public const CB_PLAY_LEVEL_PARTICLES = 0x25;
     public const CB_PLAY_LIGHT_UPDATE = 0x26;
-    public const CB_PLAY_LOGIN = 0x27;
+    /** Protocol 763: Set Container Content (обновление инвентаря), НЕ Join Game! */
+    public const CB_PLAY_SET_CONTAINER_CONTENT = 0x27;
     public const CB_PLAY_MAP_ITEM_DATA = 0x28;
-    public const CB_PLAY_MOVE_ENTITY_POS = 0x29;
-    public const CB_PLAY_MOVE_ENTITY_POS_ROT = 0x2A;
-    public const CB_PLAY_MOVE_ENTITY_ROT = 0x2B;
+    /** Protocol 763: Login (Join Game) — ИМЕННО 0x29 (было ошибочно 0x27). */
+    public const CB_PLAY_LOGIN = 0x29; // БЫЛО 0x27, СТАЛО 0x29 (Join Game)
+    public const CB_PLAY_MOVE_ENTITY_POS = 0x2A;
+    public const CB_PLAY_MOVE_ENTITY_POS_ROT = 0x2B;
     public const CB_PLAY_MOVE_VEHICLE = 0x2C;
     public const CB_PLAY_OPEN_BOOK = 0x2D;
     public const CB_PLAY_OPEN_SCREEN = 0x2E;
@@ -337,7 +339,7 @@ final class PacketId
     public const PLAY_LIMITED_PACKET_SIZE = self::CB_PLAY_SERVER_DATA;           // 0x45
     public const PLAY_SET_TITLE_TEXT = self::CB_PLAY_SET_TITLE_TEXT;             // 0x5F
     public const PLAY_ADD_PLAYER = self::CB_PLAY_ADD_PLAYER;                     // 0x03
-    public const PLAY_JOIN_GAME = self::CB_PLAY_LOGIN;                           // 0x27
+    public const PLAY_JOIN_GAME = self::CB_PLAY_LOGIN;                           // 0x29 (Join Game, Protocol 763)
     public const PLAY_PLAYER_POSITION = self::CB_PLAY_PLAYER_POSITION;           // 0x3A
     public const PLAY_PLAYER_ABILITIES = self::CB_PLAY_PLAYER_ABILITIES;         // 0x32
     public const PLAY_PLAYER_COMPOSITION = self::CB_PLAY_SET_EQUIPMENT;          // 0x55
@@ -346,7 +348,7 @@ final class PacketId
     public const PLAY_HURT_ARMOR = self::CB_PLAY_DAMAGE_EVENT;                   // 0x1A
     public const PLAY_SERVER_DIFFICULTY = self::CB_PLAY_CHANGE_DIFFICULTY;       // 0x0C
     public const PLAY_SIMULATION_DISTANCE = self::CB_PLAY_SET_SIMULATION_DISTANCE; // 0x5C
-    public const PLAY_POSITION_SYNC = self::CB_PLAY_MOVE_ENTITY_POS;             // 0x29
+    public const PLAY_POSITION_SYNC = self::CB_PLAY_MOVE_ENTITY_POS;             // 0x2A
     public const PLAY_SET_SLOT = self::CB_PLAY_CONTAINER_SET_SLOT;               // 0x16
     public const PLAY_ACTIONBAR_TEXT = self::CB_PLAY_SET_ACTION_BAR_TEXT;        // 0x46
     public const PLAY_SET_DEFAULT_SPAWN_POSITION = self::CB_PLAY_SET_DEFAULT_SPAWN_POSITION; // 0x50
@@ -517,7 +519,9 @@ final class PacketLogger
             0x21 => 'CB Play: Game Event',
             0x22 => 'CB Play: Keep Alive',
             0x23 => 'CB Play: Level Chunk With Light (Chunk Data)',
-            0x27 => 'CB Play: Login (Join Game)',
+            0x27 => 'CB Play: Set Container Content',
+            0x29 => 'CB Play: Login (Join Game)',
+            0x2A => 'CB Play: Move Entity Pos',
             0x32 => 'CB Play: Player Abilities',
             0x37 => 'CB Play: Player Info Remove',
             0x38 => 'CB Play: Player Info Update (Add)',
@@ -1132,7 +1136,7 @@ final class PacketFactory
     }
 
     /**
-     * Join Game (play S2C 0x28, protocol 763).
+     * Join Game (play S2C 0x29, protocol 763).
      *
      * Порядок полей строго по packet_login из minecraft-data 1.20:
      * entityId(i32) isHardcore(bool) gameMode(u8) previousGameMode(i8)
@@ -2128,7 +2132,8 @@ final class MinecraftServer
             'SB_CONFIG_KNOWN_PACKS' => 0x06,
             'CB_CONFIG_FINISH_CONFIGURATION' => 0x02,
             'SB_CONFIG_ACKNOWLEDGE_FINISH_CONFIGURATION' => 0x02,
-            'CB_PLAY_LOGIN' => 0x27,
+            'CB_PLAY_LOGIN' => 0x29,
+            'CB_PLAY_SET_CONTAINER_CONTENT' => 0x27,
             'CB_PLAY_PLAYER_POSITION' => 0x3A,
             'CB_PLAY_KEEP_ALIVE' => 0x22,
             'CB_PLAY_LEVEL_CHUNK_WITH_LIGHT' => 0x23,
@@ -2374,7 +2379,7 @@ final class MinecraftServer
 
     /**
      * ПРОТОКОЛ 763: после Login Acknowledged сервер ОБЯЗАН немедленно
-     * отправить Join Game (play 0x28) и остальную play-инициализацию.
+     * отправить Join Game (play 0x29) и остальную play-инициализацию.
      */
     private function onLoginAcknowledged(ClientConnection $connection): void
     {
@@ -2405,7 +2410,7 @@ final class MinecraftServer
                 PacketId::PLAY_JOIN_GAME,
                 $this->packetFactory->createJoinGame($entityId)
             );
-            PacketLogger::logInfo("Join Game (0x27) отправлен клиенту $clientId");
+            PacketLogger::logInfo("Join Game (0x29) отправлен клиенту $clientId");
 
             $this->connectionManager->sendPacket(
                 $clientId,
