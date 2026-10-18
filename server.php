@@ -145,11 +145,13 @@ final class PacketId
     public const CB_PLAY_LEVEL_EVENT = 0x24;
     public const CB_PLAY_LEVEL_PARTICLES = 0x25;
     public const CB_PLAY_LIGHT_UPDATE = 0x26;
-    public const CB_PLAY_LOGIN = 0x27;
+    /** Protocol 763: Set Container Content (обновление инвентаря), НЕ Join Game! */
+    public const CB_PLAY_SET_CONTAINER_CONTENT = 0x27;
     public const CB_PLAY_MAP_ITEM_DATA = 0x28;
-    public const CB_PLAY_MOVE_ENTITY_POS = 0x29;
-    public const CB_PLAY_MOVE_ENTITY_POS_ROT = 0x2A;
-    public const CB_PLAY_MOVE_ENTITY_ROT = 0x2B;
+    /** Protocol 763: Login (Join Game) — ИМЕННО 0x29 (было ошибочно 0x27). */
+    public const CB_PLAY_LOGIN = 0x29; // БЫЛО 0x27, СТАЛО 0x29 (Join Game)
+    public const CB_PLAY_MOVE_ENTITY_POS = 0x2A;
+    public const CB_PLAY_MOVE_ENTITY_POS_ROT = 0x2B;
     public const CB_PLAY_MOVE_VEHICLE = 0x2C;
     public const CB_PLAY_OPEN_BOOK = 0x2D;
     public const CB_PLAY_OPEN_SCREEN = 0x2E;
@@ -337,7 +339,7 @@ final class PacketId
     public const PLAY_LIMITED_PACKET_SIZE = self::CB_PLAY_SERVER_DATA;           // 0x45
     public const PLAY_SET_TITLE_TEXT = self::CB_PLAY_SET_TITLE_TEXT;             // 0x5F
     public const PLAY_ADD_PLAYER = self::CB_PLAY_ADD_PLAYER;                     // 0x03
-    public const PLAY_JOIN_GAME = self::CB_PLAY_LOGIN;                           // 0x27
+    public const PLAY_JOIN_GAME = self::CB_PLAY_LOGIN;                           // 0x29 (Join Game, Protocol 763)
     public const PLAY_PLAYER_POSITION = self::CB_PLAY_PLAYER_POSITION;           // 0x3A
     public const PLAY_PLAYER_ABILITIES = self::CB_PLAY_PLAYER_ABILITIES;         // 0x32
     public const PLAY_PLAYER_COMPOSITION = self::CB_PLAY_SET_EQUIPMENT;          // 0x55
@@ -346,7 +348,7 @@ final class PacketId
     public const PLAY_HURT_ARMOR = self::CB_PLAY_DAMAGE_EVENT;                   // 0x1A
     public const PLAY_SERVER_DIFFICULTY = self::CB_PLAY_CHANGE_DIFFICULTY;       // 0x0C
     public const PLAY_SIMULATION_DISTANCE = self::CB_PLAY_SET_SIMULATION_DISTANCE; // 0x5C
-    public const PLAY_POSITION_SYNC = self::CB_PLAY_MOVE_ENTITY_POS;             // 0x29
+    public const PLAY_POSITION_SYNC = self::CB_PLAY_MOVE_ENTITY_POS;             // 0x2A
     public const PLAY_SET_SLOT = self::CB_PLAY_CONTAINER_SET_SLOT;               // 0x16
     public const PLAY_ACTIONBAR_TEXT = self::CB_PLAY_SET_ACTION_BAR_TEXT;        // 0x46
     public const PLAY_SET_DEFAULT_SPAWN_POSITION = self::CB_PLAY_SET_DEFAULT_SPAWN_POSITION; // 0x50
@@ -517,7 +519,9 @@ final class PacketLogger
             0x21 => 'CB Play: Game Event',
             0x22 => 'CB Play: Keep Alive',
             0x23 => 'CB Play: Level Chunk With Light (Chunk Data)',
-            0x27 => 'CB Play: Login (Join Game)',
+            0x27 => 'CB Play: Set Container Content',
+            0x29 => 'CB Play: Login (Join Game)',
+            0x2A => 'CB Play: Move Entity Pos',
             0x32 => 'CB Play: Player Abilities',
             0x37 => 'CB Play: Player Info Remove',
             0x38 => 'CB Play: Player Info Update (Add)',
@@ -1132,7 +1136,7 @@ final class PacketFactory
     }
 
     /**
-     * Join Game (play S2C 0x28, protocol 763).
+     * Join Game (play S2C 0x29, protocol 763).
      *
      * Порядок полей строго по packet_login из minecraft-data 1.20:
      * entityId(i32) isHardcore(bool) gameMode(u8) previousGameMode(i8)
@@ -1431,6 +1435,8 @@ final class ClientConnection
     public int $protocol = 0;
     /** Состояние Login Plugin Request fallback: none|scheduled|sent|answered. */
     public string $pluginRequestState = 'none';
+    /** Unix-time отправки Login Success (для 5-сек таймаута Login Acknowledged). */
+    public ?int $loginSuccessAt = null;
 
     /** @param resource $socket */
     public function __construct(
@@ -1527,9 +1533,32 @@ final class ConnectionManager
         PacketLogger::logConnection("Новое подключение (ID: {$connection->id})");
     }
 
+    /**
+     * Надёжное неблокирующее чтение всех соединений (Windows-safe).
+     *
+     * Алгоритм:
+     *  1. stream_select() с нулевым таймаутом — мгновенный опрос ядра ОС,
+     *     какие сокеты готовы к чтению (не зависит от особенностей fread на
+     *     Windows, где неполные/пустые чтения случаются чаще, чем на Linux).
+     *  2. Для каждого готового сокета вычитываем ДРАЙНОМ по 8192 байта до
+     *     упора в EAGAIN/EOF — гарантированно забираем весь кадр
+     *     Login Acknowledged (0x03), даже если он пришёл фрагментами.
+     *  3. Буфер обрабатывается КАЖДЫЙ тик для каждого соединения, даже если
+     *     новых данных не пришло (там мог остаться незавершённый кадр).
+     *  4. feof() проверяется только ПОСЛЕ обработки буфера.
+     *  5. Таймаут-защита: если клиент в Login получил Login Success, но за
+     *     5 секунд не прислал Login Acknowledged (0x03) — соединение
+     *     закрывается с явным логом (типичный признак premium-аккаунта на
+     *     offline-сервере: клиент ждёт Encryption Request, которого нет).
+     */
     public function processConnections(): void
     {
         $now = time();
+
+        // --- 1. Собираем активные сокеты для stream_select ---
+        $readSockets = [];
+        /** @var array<int, int> $socketToClient маппинг (int)socket → clientId */
+        $socketToClient = [];
 
         foreach ($this->connections as $clientId => $connection) {
             if ($now - $connection->lastActivity > 120) {
@@ -1538,56 +1567,115 @@ final class ConnectionManager
                 continue;
             }
 
-            $socket = $connection->socket;
-
-            if (!is_resource($socket)) {
-                PacketLogger::logConnection("Соединение разорвано (EOF) для клиента $clientId");
+            if (is_resource($connection->socket)) {
+                $key = (int) $connection->socket;
+                $readSockets[$key] = $connection->socket;
+                $socketToClient[$key] = $clientId;
+            } else {
+                PacketLogger::logConnection("Соединение разорвано (invalid resource) для клиента $clientId");
                 $this->closeConnection($clientId);
-                continue;
             }
+        }
 
-            // 1. Читаем новые данные из сокета (безопасный лимит 8KB за раз)
-            $totalRead = '';
-            while (true) {
-                $data = @fread($socket, 8192);
-                if ($data === false || $data === '') {
-                    break;
+        // --- 2. Неблокирующий опрос готовности к чтению (таймаут 0) ---
+        if ($readSockets !== []) {
+            $write = null;
+            $except = null;
+            $ready = @stream_select($readSockets, $write, $except, 0);
+
+            if ($ready === false) {
+                // Ошибка select — пропускаем тик, но буферы всё равно
+                // обработаем ниже (шаг 3 выполняется каждый тик).
+                PacketLogger::logDebug('⚠️ stream_select вернул ошибку, пропуск опроса чтения');
+            } else {
+                foreach ($readSockets as $key => $socketResource) {
+                    $clientId = $socketToClient[$key] ?? null;
+                    $connection = $this->connections[$clientId] ?? null;
+
+                    if ($connection === null || !is_resource($socketResource)) {
+                        continue;
+                    }
+
+                    // Вычитываем ВСЁ доступное (drain-цикл, 8KB за порцию).
+                    $totalRead = '';
+                    while (true) {
+                        $data = @fread($socketResource, 8192);
+
+                        if ($data === false || $data === '') {
+                            break; // EAGAIN (нет данных) или EOF
+                        }
+
+                        $totalRead .= $data;
+
+                        if (strlen($data) < 8192) {
+                            break; // прочитан весь доступный буфер ОС
+                        }
+                    }
+
+                    if ($totalRead !== '') {
+                        $connection->buffer .= $totalRead;
+                        $connection->lastActivity = $now;
+
+                        PacketLogger::logDebug(sprintf(
+                            '📥 READ | Клиент %d | State: %s | +%d байт | raw=%s',
+                            $clientId,
+                            $connection->state->value,
+                            strlen($totalRead),
+                            substr(bin2hex($totalRead), 0, 60)
+                        ));
+                    } elseif (feof($socketResource)) {
+                        // Реальный EOF, а не просто отсутствие данных:
+                        // перед закрытием обработаем остаток входящего
+                        // буфера — там мог лежать кадр Login Acknowledged.
+                        if ($connection->buffer !== '') {
+                            $this->server->processBuffer($clientId, $connection);
+                        }
+                        $this->debugConnectionState($connection);
+                        PacketLogger::logConnection("Соединение разорвано (EOF) для клиента $clientId");
+                        $this->closeConnection($clientId);
+                    }
                 }
-                $totalRead .= $data;
-                if (strlen($data) < 8192) {
-                    break; // Прочитали всё, что было в буфере ОС
-                }
+            }
+        }
+
+        // --- 3. Обрабатываем буфер КАЖДЫЙ тик для каждого соединения ---
+        // Даже если новых данных не пришло: в буфере мог остаться кадр,
+        // собранный из нескольких фрагментов предыдущих чтений.
+        foreach ($this->connections as $clientId => $connection) {
+            if (!isset($this->connections[$clientId])) {
+                continue; // соединение закрылось на шаге 2 этого же тика
             }
 
-            // 2. Добавляем новые данные в буфер (если они есть)
-            if ($totalRead !== '') {
-                $connection->buffer .= $totalRead;
-                $connection->lastActivity = $now;
-
-                PacketLogger::logDebug(sprintf(
-                    '📥 READ | Клиент %d | State: %s | +%d байт | raw=%s',
-                    $clientId,
-                    $connection->state->value,
-                    strlen($totalRead),
-                    substr(bin2hex($totalRead), 0, 60)
-                ));
-            }
-
-            // 3. КРИТИЧЕСКИ ВАЖНО: Обрабатываем буфер КАЖДЫЙ тик,
-            // даже если новых данных не пришло (защита от фрагментации пакетов на Windows)
             if ($connection->buffer !== '') {
                 $this->server->processBuffer($clientId, $connection);
             }
 
-            // 4. Проверяем EOF только после обработки буфера
-            if (feof($socket)) {
-                // Если в буфере что-то осталось, пытаемся обработать перед закрытием
-                if ($connection->buffer !== '') {
-                    $this->server->processBuffer($clientId, $connection);
-                }
-                $this->debugConnectionState($connection);
-                PacketLogger::logConnection("Соединение разорвано (EOF) для клиента $clientId");
+            // --- 4. Таймаут-защита ожидания Login Acknowledged (0x03) ---
+            if ($connection->state === ProtocolState::Login
+                && $connection->loginSuccessAt !== null
+                && ($now - $connection->loginSuccessAt) > 5
+            ) {
+                PacketLogger::logError(
+                    "❌ Клиент $clientId не отправил Login Acknowledged (0x03) за 5 сек. "
+                    . 'Вероятно, используется Премиум аккаунт на Offline сервере!'
+                );
                 $this->closeConnection($clientId);
+                continue;
+            }
+
+            // Хвост в буфере после обработки — клиент прислал данные, которые
+            // не разбираются как валидный пакет состояния Login.
+            if ($connection->state === ProtocolState::Login
+                && $connection->username !== ''
+                && $connection->buffer !== ''
+                && $connection->loginSuccessAt !== null
+                && ($now - $connection->loginSuccessAt) > 1
+            ) {
+                PacketLogger::logInfo(
+                    '⚠️ Клиент ' . $clientId . ' не прислал корректный Login Acknowledged (0x03); '
+                    . 'хвост буфера: ' . strlen($connection->buffer) . ' байт ('
+                    . bin2hex(substr($connection->buffer, 0, 32)) . ')'
+                );
             }
         }
     }
@@ -1882,17 +1970,8 @@ final class LoginHandler implements PacketHandler
      * [UUID 16b][Username String][Properties Count VarInt=0].
      * БЕЗ поля Strict Error Handling (появилось только в 1.20.5+/766+).
      */
-    /**
-     * Login Success (login S2C 0x02) Protocol 763:
-     * [UUID 16b][Username String][Properties Count VarInt=0].
-     * БЕЗ поля Strict Error Handling (появилось только в 1.20.5+/766+).
-     */
     private function sendLoginSuccess(ClientConnection $connection, string $username): void
     {
-        // МЫ УДАЛИЛИ ОТПРАВКУ CB_LOGIN_SET_COMPRESSION (0x03)
-        // Клиент останется в режиме "без сжатия", что идеально совпадает
-        // с текущей реализацией ConnectionManager::sendPacket
-
         $payload = $this->packetFactory->createLoginSuccess($connection->uuid, $username);
 
         $ok = $this->connections->sendPacket(
@@ -1906,8 +1985,20 @@ final class LoginHandler implements PacketHandler
             return;
         }
 
-        PacketLogger::logInfo(sprintf("✅ Login Success sent клиенту %d", $connection->id));
+        // Отметка времени отправки Login Success: если клиент не пришлёт
+        // Login Acknowledged (0x03) в течение 5 секунд, ConnectionManager
+        // принудительно закроет соединение с явным логом (см.
+        // processConnections — таймаут-защита ожидания 0x03).
+        $connection->loginSuccessAt = time();
+        $connection->lastActivity = time();
+
+        PacketLogger::logInfo(sprintf(
+            "✅ Login Success sent клиенту %d",
+            $connection->id
+        ));
         PacketLogger::logInfo("⏳ Waiting for Login Acknowledged (0x03)...");
+
+        // НИКАКИХ отложенных пакетов! Просто ждем Login Acknowledged
     }
 }
 
@@ -2040,6 +2131,8 @@ final class MinecraftServer
     private readonly PacketFactory $packetFactory;
     private readonly PacketDispatcher $packetDispatcher;
     private int $lastKeepAliveAt = 0;
+    /** Счётчик тиков событийного цикла для отладочного «пульса». */
+    private int $debugTick = 0;
 
     public function __construct(public readonly ServerConfig $config)
     {
@@ -2116,7 +2209,8 @@ final class MinecraftServer
             'SB_CONFIG_KNOWN_PACKS' => 0x06,
             'CB_CONFIG_FINISH_CONFIGURATION' => 0x02,
             'SB_CONFIG_ACKNOWLEDGE_FINISH_CONFIGURATION' => 0x02,
-            'CB_PLAY_LOGIN' => 0x27,
+            'CB_PLAY_LOGIN' => 0x29,
+            'CB_PLAY_SET_CONTAINER_CONTENT' => 0x27,
             'CB_PLAY_PLAYER_POSITION' => 0x3A,
             'CB_PLAY_KEEP_ALIVE' => 0x22,
             'CB_PLAY_LEVEL_CHUNK_WITH_LIGHT' => 0x23,
@@ -2210,6 +2304,17 @@ final class MinecraftServer
     private function mainLoop(): void
     {
         while ($this->running) {
+            $this->debugTick++;
+
+            // Отладочный «пульс»: каждые ~100 тиков (≈1 сек при 10мс цикле)
+            // подтверждаем, что событийный цикл жив и не завис.
+            if ($this->debugTick % 100 === 0) {
+                PacketLogger::logDebug(
+                    '💓 Server loop alive. Active connections: '
+                    . $this->connectionManager->getConnectionCount()
+                );
+            }
+
             $this->acceptConnections();
             $this->connectionManager->processConnections();
             $this->connectionManager->tickDelayedPackets();
@@ -2362,14 +2467,19 @@ final class MinecraftServer
 
     /**
      * ПРОТОКОЛ 763: после Login Acknowledged сервер ОБЯЗАН немедленно
-     * отправить Join Game (play 0x28) и остальную play-инициализацию.
+     * отправить Join Game (play 0x29) и остальную play-инициализацию.
      */
     private function onLoginAcknowledged(ClientConnection $connection): void
     {
         $clientId = $connection->id;
+        PacketLogger::logInfo("✅ Получен Login Acknowledged (0x03) от клиента $clientId");
         PacketLogger::logInfo("✅ Login Acknowledged от клиента $clientId — переход НАПРЯМУЮ в Play (1.20.1 без Configuration)");
 
+        // Мгновенный переход Login → Play и отправка стартовых пакетов мира
+        // БЕЗ каких-либо задержек/usleep (иначе клиент не получит Join Game
+        // и отвалится по таймауту на «Подключение к серверу...»).
         $connection->state = ProtocolState::Play;
+        $connection->loginSuccessAt = null; // ACK получен — таймаут больше не нужен
         $this->sendGamePackets($connection);
     }
 
@@ -2393,7 +2503,7 @@ final class MinecraftServer
                 PacketId::PLAY_JOIN_GAME,
                 $this->packetFactory->createJoinGame($entityId)
             );
-            PacketLogger::logInfo("Join Game (0x27) отправлен клиенту $clientId");
+            PacketLogger::logInfo("Join Game (0x29) отправлен клиенту $clientId");
 
             $this->connectionManager->sendPacket(
                 $clientId,
