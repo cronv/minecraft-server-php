@@ -1435,6 +1435,8 @@ final class ClientConnection
     public int $protocol = 0;
     /** Состояние Login Plugin Request fallback: none|scheduled|sent|answered. */
     public string $pluginRequestState = 'none';
+    /** Unix-time отправки Login Success (для 5-сек таймаута Login Acknowledged). */
+    public ?int $loginSuccessAt = null;
 
     /** @param resource $socket */
     public function __construct(
@@ -1531,9 +1533,32 @@ final class ConnectionManager
         PacketLogger::logConnection("Новое подключение (ID: {$connection->id})");
     }
 
+    /**
+     * Надёжное неблокирующее чтение всех соединений (Windows-safe).
+     *
+     * Алгоритм:
+     *  1. stream_select() с нулевым таймаутом — мгновенный опрос ядра ОС,
+     *     какие сокеты готовы к чтению (не зависит от особенностей fread на
+     *     Windows, где неполные/пустые чтения случаются чаще, чем на Linux).
+     *  2. Для каждого готового сокета вычитываем ДРАЙНОМ по 8192 байта до
+     *     упора в EAGAIN/EOF — гарантированно забираем весь кадр
+     *     Login Acknowledged (0x03), даже если он пришёл фрагментами.
+     *  3. Буфер обрабатывается КАЖДЫЙ тик для каждого соединения, даже если
+     *     новых данных не пришло (там мог остаться незавершённый кадр).
+     *  4. feof() проверяется только ПОСЛЕ обработки буфера.
+     *  5. Таймаут-защита: если клиент в Login получил Login Success, но за
+     *     5 секунд не прислал Login Acknowledged (0x03) — соединение
+     *     закрывается с явным логом (типичный признак premium-аккаунта на
+     *     offline-сервере: клиент ждёт Encryption Request, которого нет).
+     */
     public function processConnections(): void
     {
         $now = time();
+
+        // --- 1. Собираем активные сокеты для stream_select ---
+        $readSockets = [];
+        /** @var array<int, int> $socketToClient маппинг (int)socket → clientId */
+        $socketToClient = [];
 
         foreach ($this->connections as $clientId => $connection) {
             if ($now - $connection->lastActivity > 120) {
@@ -1542,66 +1567,109 @@ final class ConnectionManager
                 continue;
             }
 
-            $socket = $connection->socket;
+            if (is_resource($connection->socket)) {
+                $key = (int) $connection->socket;
+                $readSockets[$key] = $connection->socket;
+                $socketToClient[$key] = $clientId;
+            } else {
+                PacketLogger::logConnection("Соединение разорвано (invalid resource) для клиента $clientId");
+                $this->closeConnection($clientId);
+            }
+        }
 
-            if (!is_resource($socket)) {
-                PacketLogger::logConnection("Соединение разорвано (EOF) для клиента $clientId");
+        // --- 2. Неблокирующий опрос готовности к чтению (таймаут 0) ---
+        if ($readSockets !== []) {
+            $write = null;
+            $except = null;
+            $ready = @stream_select($readSockets, $write, $except, 0);
+
+            if ($ready === false) {
+                // Ошибка select — пропускаем тик, но буферы всё равно
+                // обработаем ниже (шаг 3 выполняется каждый тик).
+                PacketLogger::logDebug('⚠️ stream_select вернул ошибку, пропуск опроса чтения');
+            } else {
+                foreach ($readSockets as $key => $socketResource) {
+                    $clientId = $socketToClient[$key] ?? null;
+                    $connection = $this->connections[$clientId] ?? null;
+
+                    if ($connection === null || !is_resource($socketResource)) {
+                        continue;
+                    }
+
+                    // Вычитываем ВСЁ доступное (drain-цикл, 8KB за порцию).
+                    $totalRead = '';
+                    while (true) {
+                        $data = @fread($socketResource, 8192);
+
+                        if ($data === false || $data === '') {
+                            break; // EAGAIN (нет данных) или EOF
+                        }
+
+                        $totalRead .= $data;
+
+                        if (strlen($data) < 8192) {
+                            break; // прочитан весь доступный буфер ОС
+                        }
+                    }
+
+                    if ($totalRead !== '') {
+                        $connection->buffer .= $totalRead;
+                        $connection->lastActivity = $now;
+
+                        PacketLogger::logDebug(sprintf(
+                            '📥 READ | Клиент %d | State: %s | +%d байт | raw=%s',
+                            $clientId,
+                            $connection->state->value,
+                            strlen($totalRead),
+                            substr(bin2hex($totalRead), 0, 60)
+                        ));
+                    } elseif (feof($socketResource)) {
+                        // Реальный EOF, а не просто отсутствие данных:
+                        // перед закрытием обработаем остаток входящего
+                        // буфера — там мог лежать кадр Login Acknowledged.
+                        if ($connection->buffer !== '') {
+                            $this->server->processBuffer($clientId, $connection);
+                        }
+                        $this->debugConnectionState($connection);
+                        PacketLogger::logConnection("Соединение разорвано (EOF) для клиента $clientId");
+                        $this->closeConnection($clientId);
+                    }
+                }
+            }
+        }
+
+        // --- 3. Обрабатываем буфер КАЖДЫЙ тик для каждого соединения ---
+        // Даже если новых данных не пришло: в буфере мог остаться кадр,
+        // собранный из нескольких фрагментов предыдущих чтений.
+        foreach ($this->connections as $clientId => $connection) {
+            if (!isset($this->connections[$clientId])) {
+                continue; // соединение закрылось на шаге 2 этого же тика
+            }
+
+            if ($connection->buffer !== '') {
+                $this->server->processBuffer($clientId, $connection);
+            }
+
+            // --- 4. Таймаут-защита ожидания Login Acknowledged (0x03) ---
+            if ($connection->state === ProtocolState::Login
+                && $connection->loginSuccessAt !== null
+                && ($now - $connection->loginSuccessAt) > 5
+            ) {
+                PacketLogger::logError(
+                    "❌ Клиент $clientId не отправил Login Acknowledged (0x03) за 5 сек. "
+                    . 'Вероятно, используется Премиум аккаунт на Offline сервере!'
+                );
                 $this->closeConnection($clientId);
                 continue;
             }
 
-            // Активное чтение: читаем ВСЁ доступное из сокета за проход,
-            // чтобы не пропустить Login Acknowledged (0x03), который клиент
-            // может прислать тем же TCP-сегментом или сразу после него.
-            $totalRead = '';
-            while (true) {
-                $data = @fread($socket, 65535);
-
-                if ($data === false || $data === '') {
-                    break; // нет доступных данных (неблокирующий сокет) или EOF
-                }
-
-                $totalRead .= $data;
-
-                if (strlen($data) < 65535) {
-                    break; // прочитан весь доступный буфер сокета
-                }
-            }
-
-            if ($totalRead === '') {
-                if (feof($socket)) {
-                    // ВАЖНО: перед закрытием обрабатываем остаток входящего
-                    // буфера — там мог лежать уже принятый, но не полностью
-                    // задекодированный кадр (например, Login Acknowledged).
-                    if ($connection->buffer !== '') {
-                        $this->server->processBuffer($clientId, $connection);
-                    }
-                    $this->debugConnectionState($connection);
-                    PacketLogger::logConnection("Соединение разорвано (EOF) для клиента $clientId");
-                    $this->closeConnection($clientId);
-                }
-                continue;
-            }
-
-            PacketLogger::logDebug(sprintf(
-                '📥 READ | Клиент %d | State: %s | %d байт | raw=%s',
-                $clientId,
-                $connection->state->value,
-                strlen($totalRead),
-                substr(bin2hex($totalRead), 0, 120)
-            ));
-
-            $connection->buffer .= $totalRead;
-            $connection->lastActivity = $now;
-            $this->server->processBuffer($clientId, $connection);
-
-            // Если в состоянии Login клиент уже получил Login Success, но
-            // прислал что-то, что не удалось разобрать как пакет — скорее
-            // всего он НЕ отправил Login Acknowledged (online-mode /
-            // ожидание Encryption Request / битый формат). Логируем явно.
+            // Хвост в буфере после обработки — клиент прислал данные, которые
+            // не разбираются как валидный пакет состояния Login.
             if ($connection->state === ProtocolState::Login
                 && $connection->username !== ''
                 && $connection->buffer !== ''
+                && $connection->loginSuccessAt !== null
+                && ($now - $connection->loginSuccessAt) > 1
             ) {
                 PacketLogger::logInfo(
                     '⚠️ Клиент ' . $clientId . ' не прислал корректный Login Acknowledged (0x03); '
@@ -1917,6 +1985,13 @@ final class LoginHandler implements PacketHandler
             return;
         }
 
+        // Отметка времени отправки Login Success: если клиент не пришлёт
+        // Login Acknowledged (0x03) в течение 5 секунд, ConnectionManager
+        // принудительно закроет соединение с явным логом (см.
+        // processConnections — таймаут-защита ожидания 0x03).
+        $connection->loginSuccessAt = time();
+        $connection->lastActivity = time();
+
         PacketLogger::logInfo(sprintf(
             "✅ Login Success sent клиенту %d",
             $connection->id
@@ -2056,6 +2131,8 @@ final class MinecraftServer
     private readonly PacketFactory $packetFactory;
     private readonly PacketDispatcher $packetDispatcher;
     private int $lastKeepAliveAt = 0;
+    /** Счётчик тиков событийного цикла для отладочного «пульса». */
+    private int $debugTick = 0;
 
     public function __construct(public readonly ServerConfig $config)
     {
@@ -2227,6 +2304,17 @@ final class MinecraftServer
     private function mainLoop(): void
     {
         while ($this->running) {
+            $this->debugTick++;
+
+            // Отладочный «пульс»: каждые ~100 тиков (≈1 сек при 10мс цикле)
+            // подтверждаем, что событийный цикл жив и не завис.
+            if ($this->debugTick % 100 === 0) {
+                PacketLogger::logDebug(
+                    '💓 Server loop alive. Active connections: '
+                    . $this->connectionManager->getConnectionCount()
+                );
+            }
+
             $this->acceptConnections();
             $this->connectionManager->processConnections();
             $this->connectionManager->tickDelayedPackets();
@@ -2384,9 +2472,14 @@ final class MinecraftServer
     private function onLoginAcknowledged(ClientConnection $connection): void
     {
         $clientId = $connection->id;
+        PacketLogger::logInfo("✅ Получен Login Acknowledged (0x03) от клиента $clientId");
         PacketLogger::logInfo("✅ Login Acknowledged от клиента $clientId — переход НАПРЯМУЮ в Play (1.20.1 без Configuration)");
 
+        // Мгновенный переход Login → Play и отправка стартовых пакетов мира
+        // БЕЗ каких-либо задержек/usleep (иначе клиент не получит Join Game
+        // и отвалится по таймауту на «Подключение к серверу...»).
         $connection->state = ProtocolState::Play;
+        $connection->loginSuccessAt = null; // ACK получен — таймаут больше не нужен
         $this->sendGamePackets($connection);
     }
 
