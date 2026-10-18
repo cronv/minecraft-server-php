@@ -1898,22 +1898,17 @@ final class LoginHandler implements PacketHandler
      * [UUID 16b][Username String][Properties Count VarInt=0].
      * БЕЗ поля Strict Error Handling (появилось только в 1.20.5+/766+).
      */
+    /**
+     * Login Success (login S2C 0x02) Protocol 763:
+     * [UUID 16b][Username String][Properties Count VarInt=0].
+     * БЕЗ поля Strict Error Handling (появилось только в 1.20.5+/766+).
+     */
     private function sendLoginSuccess(ClientConnection $connection, string $username): void
     {
-        // 1. Сначала отправляем Set Compression (0x03) с порогом 256 байт
-        // Это стандартная практика для Minecraft 1.20.1
-        $compressionData = VarInt::write(256); // Порог сжатия (threshold)
-        $this->connections->sendPacket(
-            $connection->id,
-            PacketId::CB_LOGIN_SET_COMPRESSION,
-            $compressionData
-        );
+        // МЫ УДАЛИЛИ ОТПРАВКУ CB_LOGIN_SET_COMPRESSION (0x03)
+        // Клиент останется в режиме "без сжатия", что идеально совпадает
+        // с текущей реализацией ConnectionManager::sendPacket
 
-        // Включаем сжатие для этого соединения (если у вас есть логика сжатия,
-        // но даже без нее клиент примет этот пакет и продолжит работу в несжатом режиме,
-        // так как мы не будем сжимать пакеты < 256 байт).
-
-        // 2. Теперь отправляем Login Success (0x02)
         $payload = $this->packetFactory->createLoginSuccess($connection->uuid, $username);
 
         $ok = $this->connections->sendPacket(
