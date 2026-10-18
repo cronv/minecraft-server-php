@@ -1546,64 +1546,48 @@ final class ConnectionManager
                 continue;
             }
 
-            // Активное чтение: читаем ВСЁ доступное из сокета за проход,
-            // чтобы не пропустить Login Acknowledged (0x03), который клиент
-            // может прислать тем же TCP-сегментом или сразу после него.
+            // 1. Читаем новые данные из сокета (безопасный лимит 8KB за раз)
             $totalRead = '';
             while (true) {
-                $data = @fread($socket, 65535);
-
+                $data = @fread($socket, 8192);
                 if ($data === false || $data === '') {
-                    break; // нет доступных данных (неблокирующий сокет) или EOF
+                    break;
                 }
-
                 $totalRead .= $data;
-
-                if (strlen($data) < 65535) {
-                    break; // прочитан весь доступный буфер сокета
+                if (strlen($data) < 8192) {
+                    break; // Прочитали всё, что было в буфере ОС
                 }
             }
 
-            if ($totalRead === '') {
-                if (feof($socket)) {
-                    // ВАЖНО: перед закрытием обрабатываем остаток входящего
-                    // буфера — там мог лежать уже принятый, но не полностью
-                    // задекодированный кадр (например, Login Acknowledged).
-                    if ($connection->buffer !== '') {
-                        $this->server->processBuffer($clientId, $connection);
-                    }
-                    $this->debugConnectionState($connection);
-                    PacketLogger::logConnection("Соединение разорвано (EOF) для клиента $clientId");
-                    $this->closeConnection($clientId);
-                }
-                continue;
+            // 2. Добавляем новые данные в буфер (если они есть)
+            if ($totalRead !== '') {
+                $connection->buffer .= $totalRead;
+                $connection->lastActivity = $now;
+
+                PacketLogger::logDebug(sprintf(
+                    '📥 READ | Клиент %d | State: %s | +%d байт | raw=%s',
+                    $clientId,
+                    $connection->state->value,
+                    strlen($totalRead),
+                    substr(bin2hex($totalRead), 0, 60)
+                ));
             }
 
-            PacketLogger::logDebug(sprintf(
-                '📥 READ | Клиент %d | State: %s | %d байт | raw=%s',
-                $clientId,
-                $connection->state->value,
-                strlen($totalRead),
-                substr(bin2hex($totalRead), 0, 120)
-            ));
+            // 3. КРИТИЧЕСКИ ВАЖНО: Обрабатываем буфер КАЖДЫЙ тик,
+            // даже если новых данных не пришло (защита от фрагментации пакетов на Windows)
+            if ($connection->buffer !== '') {
+                $this->server->processBuffer($clientId, $connection);
+            }
 
-            $connection->buffer .= $totalRead;
-            $connection->lastActivity = $now;
-            $this->server->processBuffer($clientId, $connection);
-
-            // Если в состоянии Login клиент уже получил Login Success, но
-            // прислал что-то, что не удалось разобрать как пакет — скорее
-            // всего он НЕ отправил Login Acknowledged (online-mode /
-            // ожидание Encryption Request / битый формат). Логируем явно.
-            if ($connection->state === ProtocolState::Login
-                && $connection->username !== ''
-                && $connection->buffer !== ''
-            ) {
-                PacketLogger::logInfo(
-                    '⚠️ Клиент ' . $clientId . ' не прислал корректный Login Acknowledged (0x03); '
-                    . 'хвост буфера: ' . strlen($connection->buffer) . ' байт ('
-                    . bin2hex(substr($connection->buffer, 0, 32)) . ')'
-                );
+            // 4. Проверяем EOF только после обработки буфера
+            if (feof($socket)) {
+                // Если в буфере что-то осталось, пытаемся обработать перед закрытием
+                if ($connection->buffer !== '') {
+                    $this->server->processBuffer($clientId, $connection);
+                }
+                $this->debugConnectionState($connection);
+                PacketLogger::logConnection("Соединение разорвано (EOF) для клиента $clientId");
+                $this->closeConnection($clientId);
             }
         }
     }
