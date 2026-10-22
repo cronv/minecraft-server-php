@@ -7,6 +7,25 @@ declare(strict_types=1);
  *
  * Точка входа: php server.php
  *
+ * Ключевое исправление (клиент 1.20.1 отваливался сразу после Login Success):
+ *  - Сервер ожидал пакет Login Acknowledged (login C→S 0x03) и закрывал
+ *    соединение через 5 секунд, если он не приходил. Login Acknowledged
+ *    существует только начиная с Protocol 764 (Minecraft 1.20.2+): в
+ *    Protocol 763 (1.20.1) клиенту НЕ нужно ничего подтверждать — после
+ *    получения Login Success клиент 1.20.1 СРАЗУ переходит в состояние Play
+ *    и первым своим Play-пакетом шлёт Client Information (SB Play 0x00).
+ *    Теперь сервер сам переводит соединение в Play немедленно после отправки
+ *    Login Success (для protocol >= 764 сохранено старое поведение с ожиданием
+ *    ACK — см. LoginHandler::afterLoginSuccessAccepted).
+ *  - Login Start (protocol 763): UUID читается строго по формату
+ *    [packetId VarInt][username String][UUID 16 байт] (окно = ровно 16 байт
+ *    после строки имени), а не эвристикой «последние 16 байт пакета».
+ *  - Исправлен ID пакета Player Info Update: было 0x38, по эталону
+ *    Protocol 763 (wiki.vg / minecraft-data 1.20.1) — 0x3A.
+ *  - Исправлено кадрирование Chunk Data: chunkData должен кодироваться как
+ *    беззнаковый byte[] ([VarInt длина][байты]), а не как signed-varint
+ *    длина + сырые байты.
+ *
  * Ключевые исправления относительно предыдущей версии:
  *  - NBTWriter писал имена тегов как VarInt-строки вместо обязательных
  *    unsigned short (2 байта, big-endian) — клиент не мог распарсить
