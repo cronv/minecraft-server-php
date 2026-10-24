@@ -817,7 +817,11 @@ final class Nbt
         $this->buf .= chr(self::T_COMPOUND) . pack('N', count($entries));
 
         foreach ($entries as $entry) {
-            $this->compound('', $entry);
+            // В NBT элементы списка типа Compound НЕ имеют тега 0x0A и имени!
+            // Они состоят только из своих полей (которые добавляет callback)
+            // и завершающего TAG_End (0x00).
+            $entry($this);
+            $this->buf .= chr(self::T_END);
         }
 
         return $this;
