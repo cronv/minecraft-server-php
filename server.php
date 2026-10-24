@@ -1008,7 +1008,7 @@ final class RegistryData
                 $e->byte('ultrawarm', 0)
                     ->byte('natural', 1)
                     ->double('coordinate_scale', 1.0)
-                    ->double('ambient_light', 0.0)
+                    ->float('ambient_light', 0.0)
                     ->byte('has_ceiling', 0)
                     ->byte('has_skylight', 1)
                     ->byte('piglin_safe', 0)
