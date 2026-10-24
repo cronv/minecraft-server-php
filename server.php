@@ -1669,19 +1669,6 @@ final class ConnectionManager
                 $this->server->processBuffer($clientId, $connection);
             }
 
-            // --- 4. Таймаут-защита ожидания Login Acknowledged (0x03) ---
-            if ($connection->state === ProtocolState::Login
-                && $connection->loginSuccessAt !== null
-                && ($now - $connection->loginSuccessAt) > 5
-            ) {
-                PacketLogger::logError(
-                    "❌ Клиент $clientId не отправил Login Acknowledged (0x03) за 5 сек. "
-                    . 'Вероятно, используется Премиум аккаунт на Offline сервере!'
-                );
-                $this->closeConnection($clientId);
-                continue;
-            }
-
             // Хвост в буфере после обработки — клиент прислал данные, которые
             // не разбираются как валидный пакет состояния Login.
             if ($connection->state === ProtocolState::Login
@@ -1901,6 +1888,7 @@ final class StatusHandler implements PacketHandler
 final class LoginHandler implements PacketHandler
 {
     public function __construct(
+        private readonly MinecraftServer $server,
         private readonly ConnectionManager $connections,
         private readonly PacketFactory $packetFactory,
         private readonly ServerConfig $config,
@@ -1989,6 +1977,11 @@ final class LoginHandler implements PacketHandler
      * [UUID 16b][Username String][Properties Count VarInt=0].
      * БЕЗ поля Strict Error Handling (появилось только в 1.20.5+/766+).
      */
+    /**
+     * Login Success (login S2C 0x02) Protocol 763:
+     * [UUID 16b][Username String][Properties Count VarInt=0].
+     * БЕЗ поля Strict Error Handling (появилось только в 1.20.5+/766+).
+     */
     private function sendLoginSuccess(ClientConnection $connection, string $username): void
     {
         $payload = $this->packetFactory->createLoginSuccess($connection->uuid, $username);
@@ -2004,20 +1997,28 @@ final class LoginHandler implements PacketHandler
             return;
         }
 
-        // Отметка времени отправки Login Success: если клиент не пришлёт
-        // Login Acknowledged (0x03) в течение 5 секунд, ConnectionManager
-        // принудительно закроет соединение с явным логом (см.
-        // processConnections — таймаут-защита ожидания 0x03).
-        $connection->loginSuccessAt = time();
-        $connection->lastActivity = time();
-
         PacketLogger::logInfo(sprintf(
             "✅ Login Success sent клиенту %d",
             $connection->id
         ));
-        PacketLogger::logInfo("⏳ Waiting for Login Acknowledged (0x03)...");
 
-        // НИКАКИХ отложенных пакетов! Просто ждем Login Acknowledged
+        // Protocol 763 (1.20.1): клиент НЕ шлёт Login Acknowledged (0x03).
+        // Он СРАЗУ переходит в Play и первым пакетом шлёт Client Information (0x0A).
+        // Поэтому мы НЕ ждём 0x03, а сразу переходим в Play.
+        if ($connection->protocol === 763) {
+            PacketLogger::logInfo("🎮 Protocol 763 (1.20.1): переход в Play БЕЗ ожидания Login Acknowledged");
+
+            // Мгновенный переход в Play
+            $connection->state = ProtocolState::Play;
+            $connection->loginSuccessAt = null; // Не нужен таймаут для 763
+
+            // Отправляем игровые пакеты СРАЗУ
+            $this->server->sendGamePackets($connection);
+        } else {
+            // Protocol 764+ (1.20.2+): ждём Login Acknowledged
+            $connection->loginSuccessAt = time();
+            PacketLogger::logInfo("⏳ Protocol 764+: ожидание Login Acknowledged (0x03)...");
+        }
     }
 }
 
@@ -2166,7 +2167,7 @@ final class MinecraftServer
         );
         $this->packetDispatcher->registerHandler(
             ProtocolState::Login,
-            new LoginHandler($this->connectionManager, $this->packetFactory, $config)
+            new LoginHandler($this, $this->connectionManager, $this->packetFactory, $config)
         );
         $this->packetDispatcher->registerHandler(
             ProtocolState::Play,
@@ -2459,10 +2460,12 @@ final class MinecraftServer
 
         try {
             // Перехват Login Acknowledged (0x03) в состоянии Login:
-            // единственный триггер перехода сразу в PLAY (без Configuration!).
-            if ($connection->state === ProtocolState::Login && $packetId === PacketId::SB_LOGIN_LOGIN_ACKNOWLEDGED) {
+            // ТОЛЬКО для Protocol 764+ (1.20.2+)
+            if ($connection->state === ProtocolState::Login
+                && $packetId === PacketId::SB_LOGIN_LOGIN_ACKNOWLEDGED
+                && $connection->protocol >= 764
+            ) {
                 $this->onLoginAcknowledged($connection);
-
                 return;
             }
 
