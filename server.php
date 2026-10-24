@@ -888,6 +888,19 @@ final class Nbt
         return $this;
     }
 
+    /**
+     * Network NBT (1.13+): корневой тег Compound БЕЗ имени.
+     * Формат: [Type=0x0A][Payload][Type=0x00 (End)]
+     */
+    public static function networkRoot(callable $fn): string
+    {
+        $nbt = new self();
+        $nbt->buf .= chr(self::T_COMPOUND); // Только тип, БЕЗ имени
+        $fn($nbt);
+        $nbt->buf .= chr(self::T_END);
+        return $nbt->buf;
+    }
+
     private function tagHeader(int $type, string $name): void
     {
         $this->buf .= chr($type) . pack('n', strlen($name)) . $name;
@@ -986,7 +999,27 @@ final class RegistryData
     {
         return [
             static function (Nbt $e): void {
-                $e->rawCompoundBody(self::overworldDimension());
+                // Вставляем поля overworld напрямую (без обертки Compound)
+                // listCompound сам добавит 0x0A в начале и 0x00 в конце
+                $e->byte('ultrawarm', 0)
+                    ->byte('natural', 1)
+                    ->double('coordinate_scale', 1.0)
+                    ->double('ambient_light', 0.0)
+                    ->byte('has_ceiling', 0)
+                    ->byte('has_skylight', 1)
+                    ->byte('piglin_safe', 0)
+                    ->byte('bed_works', 1)
+                    ->byte('respawn_anchor_works', 0)
+                    ->byte('has_raids', 1)
+                    ->int('min_y', -64)
+                    ->int('height', 384)
+                    ->int('logical_height', 384)
+                    ->string('infiniburn', '#minecraft:infiniburn_overworld')
+                    ->string('effects', 'minecraft:overworld')
+                    ->int('monster_spawn_light_level', 0)
+                    ->int('monster_spawn_block_light_limit', 0)
+                    ->int('id', 0)
+                    ->string('name', 'minecraft:overworld');
             },
         ];
     }
@@ -1069,7 +1102,8 @@ final class RegistryData
             return self::$dimensionCodec;
         }
 
-        self::$dimensionCodec = Nbt::root(function (Nbt $n): void {
+        // ИСПОЛЬЗУЕМ networkRoot вместо root
+        self::$dimensionCodec = Nbt::networkRoot(function (Nbt $n): void {
             $n->listCompound('minecraft:dimension_type', self::dimensionEntries())
                 ->listCompound('minecraft:worldgen/biome', self::biomeEntries());
         });
@@ -1272,7 +1306,8 @@ final class PacketFactory
         $data = pack('NN', $chunkX, $chunkZ);
 
         // Heightmaps NBT: motion_blocking + ocean_floor (short arrays по 17 нулей)
-        $hm = Nbt::root(function (Nbt $n): void {
+        // ИСПОЛЬЗУЕМ networkRoot вместо root
+        $hm = Nbt::networkRoot(function (Nbt $n): void {
             $zeros = array_fill(0, 17, 0);
             $n->primitiveArray('motion_blocking', Nbt::T_SHORT, $zeros)
                 ->primitiveArray('ocean_floor', Nbt::T_SHORT, $zeros);
