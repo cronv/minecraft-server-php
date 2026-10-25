@@ -1238,6 +1238,8 @@ final class PacketFactory
         $data .= chr(1);                              // gameMode u8: 1 = Creative
         $data .= pack('c', -1);                       // previousGameMode = none
         $data .= VarInt::write(1) . StringHandler::write('minecraft:overworld'); // worldNames
+        // ❗ ИСПРАВЛЕНИЕ: В Protocol 763 (1.20.1) dimensionCodec ОБЯЗАТЕЛЕН в Join Game!
+        // Без него клиент теряет синхронизацию парсера и падает с DecoderException.
         $data .= RegistryData::dimensionCodec();      // dimensionCodec (NBT)
         $data .= StringHandler::write('minecraft:overworld'); // worldType
         $data .= StringHandler::write('minecraft:overworld'); // worldName
@@ -1258,15 +1260,31 @@ final class PacketFactory
     /** Player Info (play S2C 0x3A): action bitflags=0x01 (add_player), 1 игрок. */
     public function createPlayerInfoAdd(string $uuid, string $username): string
     {
-        return chr(0x01)                             // actions bitflags: add_player
-            . VarInt::write(1)                       // количество игроков
-            . Uuid::toBinary($uuid)
-            . StringHandler::write($username)        // name (game_profile.displayName)
-            . VarInt::write(0)                       // properties: 0
-            . chr(0)                                 // chat session unsupported (bool)
-            . VarInt::write(1)                       // gamemode: creative
-            . VarInt::write(0)                       // ping
-            . chr(0);                                // display name: absent
+        // Битовая маска действий (Action Mask):
+        // 0x01 = add_player
+        // 0x04 = update_game_mode
+        // 0x08 = update_listed (отображение в Tab-листе)
+        // 0x10 = update_latency (ping)
+        $actions = 0x01 | 0x04 | 0x08 | 0x10; // 0x1D (29)
+
+        $data = chr($actions);                        // actions bitflags
+        $data .= VarInt::write(1);                    // количество игроков
+        $data .= Uuid::toBinary($uuid);
+
+        // --- add_player (0x01) ---
+        $data .= StringHandler::write($username);     // name
+        $data .= VarInt::write(0);                    // properties: 0
+
+        // --- update_game_mode (0x04) ---
+        $data .= VarInt::write(1);                    // gamemode: creative
+
+        // --- update_listed (0x08) ---
+        $data .= chr(1);                              // listed: true (виден в Tab)
+
+        // --- update_latency (0x10) ---
+        $data .= VarInt::write(0);                    // ping: 0
+
+        return $data;
     }
 
     /** Player Remove (play S2C 0x39): VarInt count + UUID[]. */
@@ -2662,11 +2680,16 @@ final class MinecraftServer
                 $this->packetFactory->createSetExperience()
             );
 
+            // ❌ УДАЛИТЬ ЭТОТ БЛОК:
+            // В 1.20 пакет 0x1A это Damage Event, а не Hurt Animation.
+            // Отправка Float вместо VarInt сломает буфер клиента.
+            /*
             $this->connectionManager->sendPacket(
                 $clientId,
                 PacketId::PLAY_HURT_ANIMATION,
                 $this->packetFactory->createHurtArmor($entityId)
             );
+            */
 
             $this->connectionManager->sendPacket(
                 $clientId,
