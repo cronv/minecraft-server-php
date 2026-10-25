@@ -740,6 +740,7 @@ final class Nbt
     public const T_STRING = 8;
     public const T_LIST = 9;
     public const T_COMPOUND = 10;
+    public const T_LONG_ARRAY = 12;
 
     /** @var string Аккумулирующий байтовый буфер. */
     public string $buf = '';
@@ -905,6 +906,16 @@ final class Nbt
         return $nbt->buf;
     }
 
+    public function longArray(string $name, array $values): self
+    {
+        $this->tagHeader(self::T_LONG_ARRAY, $name);
+        $this->buf .= pack('N', count($values));
+        foreach ($values as $v) {
+            $this->buf .= pack('J', $v);
+        }
+        return $this;
+    }
+
     private function tagHeader(int $type, string $name): void
     {
         $this->buf .= chr($type) . pack('n', strlen($name)) . $name;
@@ -1003,27 +1014,31 @@ final class RegistryData
     {
         return [
             static function (Nbt $e): void {
-                // Вставляем поля overworld напрямую (без обертки Compound)
-                // listCompound сам добавит 0x0A в начале и 0x00 в конце
-                $e->byte('ultrawarm', 0)
-                    ->byte('natural', 1)
-                    ->double('coordinate_scale', 1.0)
-                    ->float('ambient_light', 0.0)
-                    ->byte('has_ceiling', 0)
-                    ->byte('has_skylight', 1)
-                    ->byte('piglin_safe', 0)
-                    ->byte('bed_works', 1)
-                    ->byte('respawn_anchor_works', 0)
-                    ->byte('has_raids', 1)
-                    ->int('min_y', -64)
-                    ->int('height', 384)
-                    ->int('logical_height', 384)
-                    ->string('infiniburn', '#minecraft:infiniburn_overworld')
-                    ->string('effects', 'minecraft:overworld')
-                    ->int('monster_spawn_light_level', 0)
-                    ->int('monster_spawn_block_light_limit', 0)
-                    ->int('id', 0)
-                    ->string('name', 'minecraft:overworld');
+                // Структура элемента списка реестра: id, name, element
+                $e->int('id', 0)
+                    ->string('name', 'minecraft:overworld')
+                    ->compound('element', function (Nbt $n): void {
+                        $n->byte('ultrawarm', 0)
+                            ->byte('natural', 1)
+                            ->double('coordinate_scale', 1.0)
+                            ->float('ambient_light', 0.0)
+                            ->byte('has_ceiling', 0)
+                            ->byte('has_skylight', 1)
+                            ->byte('piglin_safe', 0)
+                            ->byte('bed_works', 1)
+                            ->byte('respawn_anchor_works', 0)
+                            ->byte('has_raids', 1)
+                            ->int('min_y', -64)
+                            ->int('height', 384)
+                            ->int('logical_height', 384)
+                            ->string('infiniburn', '#minecraft:infiniburn_overworld')
+                            ->string('effects', 'minecraft:overworld')
+                            ->compound('monster_spawn_light_level', function (Nbt $n): void {
+                                $n->string('type', 'minecraft:constant')
+                                    ->int('value', 0);
+                            })
+                            ->int('monster_spawn_block_light_limit', 0);
+                    });
             },
         ];
     }
@@ -1048,20 +1063,26 @@ final class RegistryData
         $down = $biome['downfall'];
 
         return static function (Nbt $n) use ($id, $name, $precip, $temp, $down): void {
-            $n->compound('element', function (Nbt $e) use ($precip, $temp, $down): void {
-                $e->byte('has_precipitation', $precip)
-                    ->float('depth', 0.125)
-                    ->float('temperature', $temp)
-                    ->float('downfall', $down)
-                    ->compound('effects', function (Nbt $fx): void {
-                        $fx->int('sky_color', 0x7A7FF)
-                            ->int('fog_color', 0xC0D7F)
-                            ->int('water_color', 0x3F76E4)
-                            ->int('water_fog_color', 0x50533);
-                    });
-            })
-                ->int('id', $id)
-                ->string('name', 'minecraft:' . $name);
+            // Структура элемента списка реестра: id, name, element
+            $n->int('id', $id)
+                ->string('name', 'minecraft:' . $name)
+                ->compound('element', function (Nbt $e) use ($precip, $temp, $down): void {
+                    $e->byte('has_precipitation', $precip)
+                        ->float('temperature', $temp)
+                        ->float('downfall', $down)
+                        ->compound('effects', function (Nbt $fx): void {
+                            $fx->int('sky_color', 0x7A7FF)
+                                ->int('fog_color', 0xC0D7F)
+                                ->int('water_color', 0x3F76E4)
+                                ->int('water_fog_color', 0x50533)
+                                ->compound('mood_sound', function (Nbt $ms): void {
+                                    $ms->string('sound', 'minecraft:ambient.cave')
+                                        ->int('tick_delay', 6000)
+                                        ->int('block_search_extent', 8)
+                                        ->double('offset', 2.0);
+                                });
+                        });
+                });
         };
     }
 
@@ -1070,7 +1091,7 @@ final class RegistryData
     {
         static $cached = null;
 
-        return $cached ??= Nbt::root(function (Nbt $n): void {
+        return $cached ??= Nbt::networkRoot(function (Nbt $n): void {
             $n->compound('element', function (Nbt $e): void {
                 $e->byte('ultrawarm', 0)
                     ->byte('natural', 1)
@@ -1106,10 +1127,18 @@ final class RegistryData
             return self::$dimensionCodec;
         }
 
-        // ИСПОЛЬЗУЕМ networkRoot вместо root
         self::$dimensionCodec = Nbt::networkRoot(function (Nbt $n): void {
-            $n->listCompound('minecraft:dimension_type', self::dimensionEntries())
-                ->listCompound('minecraft:worldgen/biome', self::biomeEntries());
+            // Реестр измерений
+            $n->compound('minecraft:dimension_type', function (Nbt $reg): void {
+                $reg->string('type', 'minecraft:dimension_type')
+                    ->listCompound('value', self::dimensionEntries());
+            });
+
+            // Реестр биомов
+            $n->compound('minecraft:worldgen/biome', function (Nbt $reg): void {
+                $reg->string('type', 'minecraft:worldgen/biome')
+                    ->listCompound('value', self::biomeEntries());
+            });
         });
 
         return self::$dimensionCodec;
@@ -1310,11 +1339,10 @@ final class PacketFactory
         $data = pack('NN', $chunkX, $chunkZ);
 
         // Heightmaps NBT: motion_blocking + ocean_floor (short arrays по 17 нулей)
-        // ИСПОЛЬЗУЕМ networkRoot вместо root
         $hm = Nbt::networkRoot(function (Nbt $n): void {
-            $zeros = array_fill(0, 17, 0);
-            $n->primitiveArray('motion_blocking', Nbt::T_SHORT, $zeros)
-                ->primitiveArray('ocean_floor', Nbt::T_SHORT, $zeros);
+            $zeros = array_fill(0, 256, 0);
+            $n->longArray('MOTION_BLOCKING', $zeros)
+                ->longArray('OCEAN_FLOOR', $zeros);
         });
         $data .= $hm;
 
