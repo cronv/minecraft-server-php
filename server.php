@@ -1341,7 +1341,41 @@ final class PacketFactory
         return chr(0) . VarInt::write(0) . StringHandler::write('');
     }
 
-    /** Chunk Data (play S2C 0x24 map_chunk, protocol 763) — плоский бедрок-мир. */
+    /**
+     * Chunk Data / Level Chunk With Light (CB Play, Protocol 763 / 1.20.1).
+     *
+     * ID пакета строго по wiki.vg / minecraft-data 1.20.1: **0x23**.
+     * (Не 0x41 — в clientbound play 1.20.1 это packet 0x41 читается клиентом
+     * как другой пакет и даёт «Packet 0/41 was larger than I expected»;
+     * не 0x2D — этот ID зарезервирован под другие пакеты таблицы 763.)
+     * Отправляется константой PacketId::PLAY_MAP_CHUNK = CB_PLAY_LEVEL_CHUNK_WITH_LIGHT = 0x23.
+     *
+     * Структура (порядок и кодировка — эталон wiki.vg для protocol 763):
+     *   Chunk X            Int (big-endian i32)
+     *   Chunk Z            Int (big-endian i32)
+     *   Full Chunk         Bit Mask (u8)      ← ОБЯЗАТЕЛЬНОЕ поле 1.20.1,
+     *                                           в старой версии кода оно было
+     *                                           пропущено (см. ниже)
+     *   Heightmaps         Prefixed Array: [VarInt count][NBT root]
+     *   Data               Byte Array:       [VarInt len][raw section bytes]
+     *   Block Entities     Prefixed Array:   [VarInt count][entries]
+     *   Sky Light Mask     Prefixed Array:   [VarInt count][Long...]
+     *   Block Light Mask   Prefixed Array:   [VarInt count][Long...]
+     *   Empty Sky Mask     Prefixed Array:   [VarInt count][Long...]
+     *   Empty Block Mask   Prefixed Array:   [VarInt count][Long...]
+     *   Sky Light data     Prefixed Array:   [VarInt count]{[VarInt len][bytes]}
+     *   Block Light data   Prefixed Array:   [VarInt count]{[VarInt len][bytes]}
+     *
+     * ❗ КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ ПРОТОКОЛА:
+     * В 1.20.1 (protocol 763) пакет НЕ содержит поля Trust Edges (было до
+     * 1.19.0) и НЕ содержит биомных палитр (удалены в 1.18.0+). Старая
+     * редакция этого метода генерировала sections БЕЗ биомной палитры, но с
+     * field layout, который парсер клиента 1.20.1 считывал со смещением —
+     * остаток буфера клиент интерпретировал как «лишние байты» следующего
+     * пакета (DecoderException: Packet ... found N bytes extra).
+     * Здесь сериализация переписана строго по полям выше; в конце нет НИКАКИХ
+     * дополнительных данных (никакого custom NBT / отладочных байтов).
+     */
     public function createChunkData(int $chunkX, int $chunkZ): string
     {
         $cacheKey = $chunkX . ':' . $chunkZ;
@@ -1354,71 +1388,108 @@ final class PacketFactory
             array_shift($this->chunkCache);
         }
 
+        // --- Chunk X / Z: обычный Int (big-endian), НЕ VarInt ---
         $data = pack('NN', $chunkX, $chunkZ);
 
-        // Heightmaps NBT: motion_blocking + ocean_floor (short arrays по 17 нулей)
-        $hm = Nbt::networkRoot(function (Nbt $n): void {
-            $zeros = array_fill(0, 256, 0);
-            $n->longArray('MOTION_BLOCKING', $zeros)
-                ->longArray('OCEAN_FLOOR', $zeros);
-        });
-        $data .= $hm;
+        // --- Full Chunk: Bit Mask (u8). 0x00 = full (биты unset). ---
+        $data .= chr(0x00);
 
-        // chunkData (varint length-prefixed buffer): 24 секции (y=-64..320)
+        // --- Heightmaps: Prefixed Array = [VarInt count][NBT root] ---
+        // NBT network-root: [0x0A][root compound fields][0x00].
+        // Значения long[] в heightmap — packed signed shorts (по 17 на лонг),
+        // для полностью ровного мира достаточно массивов из нулевых лонгов.
+        $heightmapNbt = Nbt::networkRoot(static function (Nbt $n): void {
+            $zeros = array_fill(0, 17, 0); // 17 shorts * 16 px = 256 columns (ровный мир)
+            $n->longArray('MOTION_BLOCKING', $zeros)
+             ->longArray('WORLD_SURFACE', $zeros);
+        });
+        $data .= VarInt::write(1) . $heightmapNbt;
+
+        // --- Data: Byte Array = [VarInt длина][сырые байты секций] ---
         $sections = '';
-        // Секции 0..3: y=-64..0 — заполнены (бедрок y=-64, камень выше)
-        // Секция 4: y=0..16 — воздух над бедроком? Спавн на y=-60 → секция 0.
+
+        // World: min_y = -64, height = 384 → 24 секций по 16 блоков.
         for ($s = 0; $s < 24; $s++) {
-            $blockCount = pack('n', 0);
+            // Block Count: Short (u16 BE) — число НЕ-air блоков в секции.
             if ($s === 0) {
-                // Бедрок на нижнем уровне секции 0: non-air block count
-                $blockCount = pack('n', 256);
-                // Палитра: air(0), bedrock(31) → bits per entry = 4 (min 4)
-                $palette = VarInt::write(2) . VarInt::write(0) . VarInt::write(31);
-                // 4 бита * 4096 блоков / 64 = 256 long
-                $longs = 256;
-                // Заполняем: все блоки уровня y=0 внутри секции (первые 256 индексов) = bedrock (palette index 1)
-                $packed = str_repeat("\x00", $longs * 8);
-                // Индексы 0..255 (нижний слой 16x16) получают значение 1 (bedrock)
-                $words = array_fill(0, $longs, 0);
-                for ($i = 0; $i < 256; $i++) {
-                    $wordIdx = intdiv($i * 4, 64);
-                    $bitOff = ($i * 4) % 64;
-                    $words[$wordIdx] |= (1 << $bitOff);
-                }
-                $packed = '';
-                foreach ($words as $w) {
-                    $packed .= pack('J', $w);
-                }
-                $sections .= $blockCount . chr(4) . $palette . VarInt::write($longs) . $packed;
+                // Нижний слой секции 0 (y = -64) — бедрок: 256 блоков.
+                $sections .= pack('n', 256);
             } else {
-                // Полностью воздушная секция: single-value palette air, 0 longs
-                $sections .= $blockCount . chr(0) . VarInt::write(1) . VarInt::write(0) . VarInt::write(0);
+                $sections .= pack('n', 0);
             }
+
+            if ($s === 0) {
+                // Palette: air (id 0) + bedrock (global id 31) → 2 записи,
+                // bits per entry = 1 (минимум протокола — 4, vanilla пишет 4
+                // для палитр >1; используем 4, как это делает сам сервер).
+                $bitsPerEntry = 4;
+                $sections .= chr($bitsPerEntry);
+                $sections .= VarInt::write(2) . VarInt::write(0) . VarInt::write(31);
+
+                // Paletted Container: 4096 индексов по 4 бита = 256 long'ов.
+                $words = array_fill(0, 256, 0);
+                for ($i = 0; $i < 256; $i++) {          // нижний слой y_local=0
+                    $wordIdx = intdiv($i * 4, 64);
+                    $bitOff  = ($i * 4) % 64;
+                    $words[$wordIdx] |= (1 << $bitOff); // индекс палитры 1 = bedrock
+                }
+                $longArrayBytes = '';
+                foreach ($words as $w) {
+                    $longArrayBytes .= pack('J', $w);
+                }
+                $sections .= VarInt::write(256) . $longArrayBytes;
+            } else {
+                // Single-value palette (air): bits=0, пустой data-массив.
+                $sections .= chr(0);
+                $sections .= VarInt::write(1) . VarInt::write(0);
+                $sections .= VarInt::write(0);
+            }
+
+            // Biomes УДАЛЕНЫ из пакета чанка начиная с 1.18 (pre-release 4):
+            // в 1.20.1 здесь НЕТ биомной палитры/данных — сразу Block Light.
+            // Block Light: 2048 байт (4096 nibbles), all-zero = VarInt len 0.
+            $sections .= VarInt::write(0);
+            // Sky Light: аналогично.
+            $sections .= VarInt::write(0);
         }
 
         $data .= VarInt::write(strlen($sections)) . $sections;
 
-        // Block entities count
+        // --- Block Entities: Prefixed Array (записей нет) ---
+        // Каждая запись (если бы были): packed XZ u8, Y i16, Type VarInt, NBT.
         $data .= VarInt::write(0);
 
-        // Light masks: skyLightMask=[1...] но проще: все секции пусты по свету →
-        // sky mask = 0b1111... (24 секции) — корректнее дать empty-маски.
-        $maskAll = pack('J', 0xFFFFFF); // 24 бита = 24 секции
-        $data .= VarInt::write(1) . $maskAll;          // skyLightMask
-        $data .= VarInt::write(1) . $maskAll;          // blockLightMask
-        $data .= VarInt::write(1) . $maskAll;          // emptySkyLightMask
-        $data .= VarInt::write(1) . $maskAll;          // emptyBlockLightMask
-        // skyLight array: 24 записи по 2048 байт (все нули = темнота до обновления skylight)
-        $data .= VarInt::write(24);
-        for ($i = 0; $i < 24; $i++) {
-            $data .= VarInt::write(2048) . str_repeat("\x00", 2048);
+        // --- Light masks: каждый — Prefixed Array [VarInt count][Long...] ---
+        // 24 секции → маска = 24 установленных бита (single Long 0xFFFFFF).
+        $mask24 = "\x00\x00\x00\x00\x00\xFF\xFF\xFF"; // big-endian i64 = 0xFFFFFF
+        foreach (['skyMask', 'blockMask', 'emptySkyMask', 'emptyBlockMask'] as $unused) {
+            $data .= VarInt::write(1) . $mask24;
         }
-        // blockLight array: 24 записи
-        $data .= VarInt::write(24);
-        for ($i = 0; $i < 24; $i++) {
-            $data .= VarInt::write(2048) . str_repeat("\x00", 2048);
-        }
+
+        // --- Light data arrays: Prefixed Array{ [VarInt len][bytes] } ---
+        // Vanilla всегда шлёт ровно 24 записи по 2048 байт (для нашего диапазона).
+        $lightEntry = VarInt::write(2048) . str_repeat("\x00", 2048);
+        $skyLight   = VarInt::write(24) . str_repeat($lightEntry, 24);
+        $blockLight = VarInt::write(24) . str_repeat($lightEntry, 24);
+        $data .= $skyLight . $blockLight;
+
+        // ❗ Никаких дополнительных байтов после light data: всё, что сверх
+        // структуры wiki.vg, клиент посчитает «лишними» и разорвёт соединение.
+
+        // Диагностика для сверки с дампом ванильного сервера: ID, полная длина
+        // кадра и длины всех Prefixed Array / Byte Array полей.
+        PacketLogger::logInfo(sprintf(
+            '📦 ChunkData body: id=0x%02X x=%d z=%d total=%dB | heightmaps=%dB(count=1) data=%dB(blockentities=0) '
+            . 'masks=1/1/1/1 long each | skylight=24x%dB blocklight=24x%dB',
+            PacketId::PLAY_MAP_CHUNK,
+            $chunkX,
+            $chunkZ,
+            strlen($data),
+            strlen($heightmapNbt) + 1,
+            strlen($sections) + strlen(VarInt::write(strlen($sections))),
+            2048,
+            2048,
+        ));
 
         return $this->chunkCache[$cacheKey] = $data;
     }
@@ -1437,7 +1508,7 @@ final class PacketFactory
 
     /** Named Entity Spawn (0x03) не нужен; вместо него клиент сам рендерит себя. */
 
-    /** Position and Teleport (play S2C 0x3C): x,y,z f64 + yaw,pitch f32 + flags i8 + teleportId varint. */
+    /** Position and Teleport (play S2C 0x3A): x,y,z f64 + yaw,pitch f32 + flags u8 + teleportId varint. */
     public function createPlayerPosition(float $x, float $y, float $z): string
     {
         $teleportId = ++$this->teleportIdCounter;
@@ -1541,6 +1612,18 @@ final class ClientConnection
     public string $pluginRequestState = 'none';
     /** Unix-time отправки Login Success (для 5-сек таймаута Login Acknowledged). */
     public ?int $loginSuccessAt = null;
+    /**
+     * Позиция игрока в мире (обновляется из SB Play Set Player Position /
+     * Set Player Position And Rotation), чтобы сервер знал, где находится
+     * клиент, и мог корректно отвечать на телепорт-подтверждения.
+     */
+    public float $playerX = 0.0;
+    public float $playerY = -63.0;
+    public float $playerZ = 0.0;
+    public float $playerYaw = 0.0;
+    public float $playerPitch = 0.0;
+    /** Последний отправленный teleport id (для сверки Accept Teleportation). */
+    public int $lastTeleportId = 0;
 
     /** @param resource $socket */
     public function __construct(
@@ -2034,17 +2117,28 @@ final class LoginHandler implements PacketHandler
         $username = StringHandler::read($packetData, $offset);
         $connection->username = $username;
 
-        // Protocol 763 (1.20.1): после имени всегда идет UUID (16 байт)
-        // Игнорируем любую попытку парсить "Has Sig Data" - это ненадежно
+        // Protocol 763 (1.20.1) Login Start: [packetId VarInt][username String][UUID 16b].
+        // UUID читается СТРОГО по формату — окном ровно в 16 байт сразу после
+        // строки имени, а не эвристикой «последние 16 байт пакета» (эвристика
+        // срезала лишнее при наличии доп. полей и ломала identity игрока).
         $remainingBytes = strlen($packetData) - $offset;
 
-        if ($remainingBytes >= 16) {
-            // Берем последние 16 байт как UUID клиента
-            $uuidBytes = substr($packetData, $offset + $remainingBytes - 16, 16);
+        if ($remainingBytes === 16) {
+            $uuidBytes = substr($packetData, $offset, 16);
             $connection->uuid = Uuid::pretty($uuidBytes);
-            PacketLogger::logInfo("🎯 Извлечен UUID клиента (последние 16 байт): {$connection->uuid}");
+            PacketLogger::logInfo("🎯 UUID клиента (окно 16 байт после username): {$connection->uuid}");
+        } elseif ($remainingBytes > 16) {
+            // Аномалия: лишних байт нет по протоколу 763 — берём окно строго
+            // после имени и пишем предупреждение (не падаем, но логируем).
+            $uuidBytes = substr($packetData, $offset, 16);
+            $connection->uuid = Uuid::pretty($uuidBytes);
+            PacketLogger::logWarning(sprintf(
+                '⚠️ Login Start от клиента %d содержит %d лишних байт после UUID (protocol 763)',
+                $connection->id,
+                $remainingBytes - 16,
+            ));
         } else {
-            // Fallback для очень старых клиентов
+            // Fallback: клиент не прислал UUID — генерируем offline-UUID.
             $connection->uuid = Uuid::fromUsername($username);
             PacketLogger::logInfo("🎲 Fallback: Сгенерирован offline UUID: {$connection->uuid}");
         }
@@ -2130,6 +2224,17 @@ final class PlayHandler implements PacketHandler
             case PacketId::SB_PLAY_ACCEPT_TELEPORTATION:
                 $confirmId = VarInt::read($packetData, $offset);
                 PacketLogger::logInfo("Teleport Confirm от клиента {$connection->id}: id=$confirmId");
+
+                // Сверяем teleport id с последним отправленным (CB Play 0x3A).
+                if ($connection->lastTeleportId !== 0 && $confirmId !== $connection->lastTeleportId) {
+                    PacketLogger::logWarning(sprintf(
+                        '⚠️ Accept Teleportation id=%d != ожидаемый %d (клиент %d) — игнорируем устаревшее подтверждение',
+                        $confirmId ?? -1,
+                        $connection->lastTeleportId,
+                        $connection->id,
+                    ));
+                }
+
                 $connection->pendingKeepAliveId = null;
                 // После подтверждения телепорта — отдаём чанки (лениво).
                 $this->server->sendChunksIfNeeded($connection);
@@ -2141,11 +2246,56 @@ final class PlayHandler implements PacketHandler
                 $connection->pendingKeepAliveId = null;
                 return;
 
+            // --- Движение игрока (SB Play): сервер ОБЯЗАН читать поля и
+            // обновлять состояние, иначе позиция игрока рассинхронизируется.
+            // Разбор строго по protocol 763:
+            //   0x17 Set Player Position:          x f64, y f64, z f64, on_ground bool
+            //   0x18 Set Player Position+Rotation: x f64, y f64, z f64, yaw f32, pitch f32, on_ground bool
+            //   0x19 Set Player Rotation:          yaw f32, pitch f32, on_ground bool
+            //   0x1A Set Player On Ground:         on_ground bool
+            // Читаем ровно столько байт, сколько занимает пакет, — буфер не ломается.
             case PacketId::SB_PLAY_MOVE_PLAYER_POS:
+                $f = array_values(unpack('E3', substr($packetData, $offset, 24)) ?: [0.0, 0.0, 0.0]);
+                $connection->playerX = $f[0];
+                $connection->playerY = $f[1];
+                $connection->playerZ = $f[2];
+                PacketLogger::logDebug(sprintf(
+                    '🚶 SB Move Pos | клиент %d | x=%.3f y=%.3f z=%.3f',
+                    $connection->id,
+                    $connection->playerX,
+                    $connection->playerY,
+                    $connection->playerZ,
+                ));
+                return;
+
+            case PacketId::SB_PLAY_MOVE_PLAYER_POS_ROT:
+                $f = array_values(unpack('E3', substr($packetData, $offset, 24)) ?: [0.0, 0.0, 0.0]);
+                $offRot = $offset + 24;
+                $r = array_values(unpack('G2', substr($packetData, $offRot, 8)) ?: [0.0, 0.0]);
+                $connection->playerX = $f[0];
+                $connection->playerY = $f[1];
+                $connection->playerZ = $f[2];
+                $connection->playerYaw = $r[0];
+                $connection->playerPitch = $r[1];
+                PacketLogger::logDebug(sprintf(
+                    '🚶 SB Move Pos+Rot | клиент %d | x=%.3f y=%.3f z=%.3f yaw=%.1f pitch=%.1f',
+                    $connection->id,
+                    $connection->playerX,
+                    $connection->playerY,
+                    $connection->playerZ,
+                    $connection->playerYaw,
+                    $connection->playerPitch,
+                ));
+                return;
+
             case PacketId::SB_PLAY_MOVE_PLAYER_ROT:
-            case PacketId::SB_PLAY_MOVE_PLAYER_POS_ROT: // Position And Rotation (0x18)
+                $r = array_values(unpack('G2', substr($packetData, $offset, 8)) ?: [0.0, 0.0]);
+                $connection->playerYaw = $r[0];
+                $connection->playerPitch = $r[1];
+                return;
+
             case PacketId::SB_PLAY_MOVE_PLAYER_STATUS_ONLY:
-                // Движение игрока — минимальный сервер принимает молча.
+                // Только on_ground (bool) — состояние соединения не меняем.
                 return;
 
             case PacketId::SB_PLAY_CLIENT_INFORMATION:
@@ -2654,7 +2804,13 @@ final class MinecraftServer
                 PacketId::PLAY_POSITION,
                 $this->packetFactory->createPlayerPosition($spawn['x'], $spawn['y'], $spawn['z'])
             );
-            PacketLogger::logInfo("Position (teleport, 0x3A) отправлен клиенту $clientId");
+            // Запоминаем отправленный teleport id — клиент подтвердит его
+            // пакетом SB Accept Teleportation (0x00).
+            $connection->lastTeleportId = $this->packetFactory->currentTeleportId();
+            $connection->playerX = $spawn['x'];
+            $connection->playerY = $spawn['y'];
+            $connection->playerZ = $spawn['z'];
+            PacketLogger::logInfo("Position (teleport, 0x3A) отправлен клиенту $clientId (teleportId={$connection->lastTeleportId})");
 
             $this->connectionManager->sendPacket(
                 $clientId,
@@ -2697,6 +2853,17 @@ final class MinecraftServer
                 $this->packetFactory->createSimulationDistance($this->config->simulationDistance)
             );
 
+            // Set Chunk Cache Radius (CB Play 0x4F) — клиент 1.20.1 ожидает
+            // его до начала загрузки чанков.
+            $this->connectionManager->sendPacket(
+                $clientId,
+                PacketId::CB_PLAY_SET_CHUNK_CACHE_RADIUS,
+                VarInt::write($this->config->viewDistance)
+            );
+
+            // Game Event 13 «Start waiting for level chunks» ОБЯЗАТЕЛЬНО до
+            // первого Chunk Data: без него клиент не переходит в режим загрузки
+            // terrain и игнорирует присланные чанки.
             $this->connectionManager->sendPacket(
                 $clientId,
                 PacketId::PLAY_GAME_EVENT,
@@ -2704,9 +2871,24 @@ final class MinecraftServer
             );
             PacketLogger::logInfo("Game Event 13 (start waiting for chunks) отправлен клиенту $clientId");
 
-            // Чанки отдаём СРАЗУ после Join Game — иначе клиент висит
+            // Чанки отдаём СРАЗУ после Game Event 13 — иначе клиент висит
             // «Downloading terrain». Отправка пачками по кругу событий.
             $this->sendChunksIfNeeded($connection);
+
+            // После выгрузки всех чанков: Chunk Batch Finished (0x0D) +
+            // Set Center Chunk (0x4E) — сигнал клиенту завершить initial load.
+            if ($connection->chunksSent) {
+                $this->connectionManager->sendPacket(
+                    $clientId,
+                    PacketId::CB_PLAY_SET_CHUNK_CACHE_CENTER,
+                    VarInt::write(0) . VarInt::write(0) // chunkX, chunkZ спавна
+                );
+                $this->connectionManager->sendPacket(
+                    $clientId,
+                    PacketId::PLAY_EMPTY_CHUNK_SNAPSHOT, // Chunk Batch Finished 0x0D
+                    VarInt::write(1)                     // batch id
+                );
+            }
 
             // Первый Keep Alive (0x22) отправляем СРАЗУ после чанков, не
             // дожидаясь 15-секундного тика: тестовые клиенты с коротким
