@@ -25,6 +25,11 @@ declare(strict_types=1);
  *  - Исправлено кадрирование Chunk Data: chunkData должен кодироваться как
  *    беззнаковый byte[] ([VarInt длина][байты]), а не как signed-varint
  *    длина + сырые байты.
+ *  - В сериализацию секций чанка добавлен ОБЯЗАТЕЛЬНЫЙ биомный Paletted
+ *    Container (1.18+: block states + biomes). Без него парсер клиента
+ *    терял синхронизацию и рвал соединение с
+ *    «DecoderException: Packet ... was larger than I expected, found N
+ *    bytes extra whilst reading packet».
  *
  * Ключевые исправления относительно предыдущей версии:
  *  - NBTWriter писал имена тегов как VarInt-строки вместо обязательных
@@ -1368,11 +1373,13 @@ final class PacketFactory
      *
      * ❗ КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ ПРОТОКОЛА:
      * В 1.20.1 (protocol 763) пакет НЕ содержит поля Trust Edges (было до
-     * 1.19.0) и НЕ содержит биомных палитр (удалены в 1.18.0+). Старая
-     * редакция этого метода генерировала sections БЕЗ биомной палитры, но с
-     * field layout, который парсер клиента 1.20.1 считывал со смещением —
-     * остаток буфера клиент интерпретировал как «лишние байты» следующего
-     * пакета (DecoderException: Packet ... found N bytes extra).
+     * 1.19.0). Но каждая секция чанка ОБЯЗАТЕЛЬНО содержит ДВА палитрованных
+     * контейнера: Block State IDs и Biomes (1.18+). Удалена из пакета была
+     * только отдельная биомная палитра как поле — не сами биомы. Старая
+     * редакция этого метода генерировала sections БЕЗ биомного контейнера,
+     * и парсер клиента 1.20.1 считывал «биомы» со смещением — остаток
+     * буфера клиент интерпретировал как «лишние байты» следующего пакета
+     * (DecoderException: Packet ... found N bytes extra whilst reading packet).
      * Здесь сериализация переписана строго по полям выше; в конце нет НИКАКИХ
      * дополнительных данных (никакого custom NBT / отладочных байтов).
      */
@@ -1408,48 +1415,76 @@ final class PacketFactory
         // --- Data: Byte Array = [VarInt длина][сырые байты секций] ---
         $sections = '';
 
-        // World: min_y = -64, height = 384 → 24 секций по 16 блоков.
+        // ❗ КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ («found N bytes extra whilst reading packet»):
+        // В 1.18+ (в т.ч. Protocol 763 / 1.20.1) каждая секция чанка содержит
+        // ДВА палитрованных контейнера: блоки (2304 значения по 4 бита) и
+        // биомы (1024 значения по 4 бита = 64 long'а). Биомы НЕ удалены из
+        // пакета — удалена была только отдельная биомная ПАЛИТРА (она всегда
+        // single-value). Старая редакция писала sections без биомного
+        // контейнера; клиент дочитывал «биомы» из байтов следующего поля
+        // (Block Entities count), съезжал по потоку и остаток буфера
+        // интерпретировал как лишние байты пакета (DecoderException).
+        //
+        // Формат секции (wiki.vg, Chunk Section Format 1.18—1.20.1):
+        //   Block Count      u16 BE
+        //   Block State IDs  [bits u8][palette VarInt*][data VarInt longs + 8*longs]
+        //   Biomes           [bits u8=4][palette VarInt 1 + id][data VarInt 64 + 512B]
+        //   Block Light      ByteArray [VarInt len][bytes]
+        //   Sky Light        ByteArray [VarInt len][bytes]
+
+        // Пакетное значение biome id = индекс в реестре 'minecraft:worldgen/biome' + 1
+        // (так кодирует палитры чанков vanilla). В реестре этого сервера
+        // RegistryData::BIOMES 'plains' занимает индекс 35 → пакетное значение 36.
+        $plainsBiomeId = 36;
+
+        // Пакованные 4-битные индексы: нижний слой (x,y_local=0,z) = палитра 1
+        // (бедрок), остальные 4095 ячеек = палитра 0 (воздух). Индексы идут в
+        // линейном порядке blockstate-сканирования x | (z<<4) | (y<<8), биты —
+        // LSB-first внутри каждого long (по эталону vanilla PalettedContainer).
+        $blockWords = array_fill(0, 64 * 4, 0); // 256 long'ов
+        for ($i = 0; $i < 256; $i++) {          // y_local = 0 → i = x | (z<<4)
+            $bitPos = $i * 4;                   // 4 бита на значение
+            $wordIdx = intdiv($bitPos, 64);
+            $bitOff  = $bitPos % 64;
+            $blockWords[$wordIdx] |= (1 << $bitOff); // индекс палитры 1 = bedrock
+        }
+
+        // World: min_y = -64, height = 384 → 24 секции по 16 блоков.
         for ($s = 0; $s < 24; $s++) {
             // Block Count: Short (u16 BE) — число НЕ-air блоков в секции.
-            if ($s === 0) {
-                // Нижний слой секции 0 (y = -64) — бедрок: 256 блоков.
-                $sections .= pack('n', 256);
-            } else {
-                $sections .= pack('n', 0);
-            }
+            $sections .= pack('n', $s === 0 ? 256 : 0);
 
+            // --- Block State IDs (Paletted Container) ---
             if ($s === 0) {
-                // Palette: air (id 0) + bedrock (global id 31) → 2 записи,
-                // bits per entry = 1 (минимум протокола — 4, vanilla пишет 4
-                // для палитр >1; используем 4, как это делает сам сервер).
-                $bitsPerEntry = 4;
-                $sections .= chr($bitsPerEntry);
+                // Палитра: air (0) + bedrock (global id 31), bits per entry = 4
+                // (минимум протокола для многозначных палитр, как в vanilla).
+                $sections .= chr(4);
                 $sections .= VarInt::write(2) . VarInt::write(0) . VarInt::write(31);
 
-                // Paletted Container: 4096 индексов по 4 бита = 256 long'ов.
-                $words = array_fill(0, 256, 0);
-                for ($i = 0; $i < 256; $i++) {          // нижний слой y_local=0
-                    $wordIdx = intdiv($i * 4, 64);
-                    $bitOff  = ($i * 4) % 64;
-                    $words[$wordIdx] |= (1 << $bitOff); // индекс палитры 1 = bedrock
-                }
+                // 4096 значений × 4 бита = 256 long'ов (16 лонгов на подкасекцию).
                 $longArrayBytes = '';
-                foreach ($words as $w) {
+                foreach ($blockWords as $w) {
                     $longArrayBytes .= pack('J', $w);
                 }
                 $sections .= VarInt::write(256) . $longArrayBytes;
             } else {
-                // Single-value palette (air): bits=0, пустой data-массив.
+                // Single-value палитра (air): bits=0, data-массив отсутствует.
                 $sections .= chr(0);
                 $sections .= VarInt::write(1) . VarInt::write(0);
-                $sections .= VarInt::write(0);
             }
 
-            // Biomes УДАЛЕНЫ из пакета чанка начиная с 1.18 (pre-release 4):
-            // в 1.20.1 здесь НЕТ биомной палитры/данных — сразу Block Light.
-            // Block Light: 2048 байт (4096 nibbles), all-zero = VarInt len 0.
+            // --- Biomes (Paletted Container, ОБЯЗАТЕЛЬНО в 1.18+) ---
+            // Всегда single-value палитра plains: bits=4, палитра из 1 записи,
+            // ровно 64 long'а нулевых данных (клиент читает data даже при
+            // палитре из одного значения — именно здесь старая версия теряла
+            // синхронизацию парсера).
+            $sections .= chr(4);
+            $sections .= VarInt::write(1) . VarInt::write($plainsBiomeId);
+            $sections .= VarInt::write(64) . str_repeat("\x00", 64 * 8);
+
+            // Block Light: ByteArray (для пустого освещения — длина 0).
             $sections .= VarInt::write(0);
-            // Sky Light: аналогично.
+            // Sky Light: ByteArray (аналогично).
             $sections .= VarInt::write(0);
         }
 
