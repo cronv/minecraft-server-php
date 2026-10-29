@@ -84,16 +84,36 @@ function validate_chunk_body(string $body, int $expectId): array {
     $sectionReport = [];
     for ($s = 0; $s < 24; $s++) {
         $blockCount = unpack('n', substr($sections, $secOff, 2))[1]; $secOff += 2;
+
+        // --- Block State IDs: Paletted Container (1.18+ chunk section format) ---
         $bits = ord($sections[$secOff]); $secOff += 1;
         $palSize = vi_read($sections, $secOff);
-        for ($p = 0; $p < $palSize; $p++) vi_read($sections, $secOff);
+        $palette = [];
+        for ($p = 0; $p < $palSize; $p++) $palette[] = vi_read($sections, $secOff);
         if ($bits === 0) {
-            $sectionReport[] = "s$s:count=$blockCount,bits=0,pal=$palSize,data=0";
+            $dataLongs = 0;
         } else {
-            $longs = vi_read($sections, $secOff);
-            $secOff += $longs * 8;
-            $sectionReport[] = "s$s:count=$blockCount,bits=$bits,pal=$palSize, longs=$longs";
+            $dataLongs = vi_read($sections, $secOff);
+            $secOff += $dataLongs * 8;
         }
+
+        // --- Biomes: Paletted Container (ОБЯЗАТЕЛЕН в 1.18+/1.20.1) ---
+        // 4 bits per entry × 1024 значений = 64 long'а данных.
+        $bBits = ord($sections[$secOff]); $secOff += 1;
+        $bPalSize = vi_read($sections, $secOff);
+        $bPalette = [];
+        for ($p = 0; $p < $bPalSize; $p++) $bPalette[] = vi_read($sections, $secOff);
+        if ($bBits === 0) {
+            $biomeDataLongs = 0;
+        } else {
+            $biomeDataLongs = vi_read($sections, $secOff);
+            $secOff += $biomeDataLongs * 8;
+        }
+
+        $sectionReport[] = "s$s:count=$blockCount,bits=$bits,pal=" . implode('/', $palette)
+            . ",longs=$dataLongs | biome:bits=$bBits,pal=" . implode('/', $bPalette)
+            . ",longs=$biomeDataLongs";
+
         $bl = vi_read($sections, $secOff); $secOff += $bl;       // Block light byte array
         $sl = vi_read($sections, $secOff); $secOff += $sl;       // Sky light byte array
     }
@@ -152,7 +172,8 @@ if ($report['extraBytesAtEnd'] !== 0) {
 // Второй чанк (воздушный, вне спавна тоже валиден — идентичен по структуре)
 $body2 = "\x23" . $factory->createChunkData(-4, 3);
 $r2 = validate_chunk_body($body2, 0x23);
-if ($r2['extraBytesAtEnd'] !== 0 && $r2['x'] === -4 && $r2['z'] === 3) {
+foreach ($r2 as $k => $v) echo "  [chunk -4,3] $k: $v\n";
+if ($r2['extraBytesAtEnd'] === 0 && $r2['x'] === -4 && $r2['z'] === 3) {
     echo "RESULT: PASS — пакет 0x23 разобран клиент-парсером без лишних байт (оба чанка)\n";
     exit(0);
 }
