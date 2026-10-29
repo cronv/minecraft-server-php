@@ -2833,6 +2833,9 @@ final class MinecraftServer
                 PacketId::PLAY_SPAWN_POSITION,
                 $this->packetFactory->createSpawnPosition(0, -64, 0)
             );
+            /**
+             * HERE PacketId::PLAY_SPAWN_POSITION: Internal Exception: io.netty.handler.codec.DecoderException: java.io.IOException: Packet 0/41 (wi) was larger than I expected, found 19154 bytes extra whilst reading packet 41
+             */
 
             $this->connectionManager->sendPacket(
                 $clientId,
