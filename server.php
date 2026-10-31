@@ -1142,16 +1142,14 @@ final class RegistryData
                 $n->int('id', 0)
                     ->string('name', 'minecraft:chat')
                     ->compound('element', function (Nbt $e): void {
-                        // chat: плоская структура без 'decoration'
                         $e->compound('chat', function (Nbt $chat): void {
                             $chat->string('translation_key', 'chat.type.text')
-                                ->listString('parameters', ['sender', 'content']);
+                                ->primitiveArray('parameters', Nbt::T_INT, [0, 2]); // 0 = sender, 2 = content
                         })
-                            // narration: та же структура (клиент 1.20.1 ожидает оба поля)
-                            ->compound('narration', function (Nbt $nar): void {
-                                $nar->string('translation_key', 'chat.type.text.narrate')
-                                    ->listString('parameters', ['sender', 'content']);
-                            });
+                        ->compound('narration', function (Nbt $nar): void {
+                            $nar->string('translation_key', 'chat.type.text.narrate')
+                                ->primitiveArray('parameters', Nbt::T_INT, [0, 2]);
+                        });
                     });
             },
         ];
