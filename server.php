@@ -883,6 +883,16 @@ final class Nbt
         return $this;
     }
 
+    public function listString(string $name, array $values): self
+    {
+        $this->tagHeader(self::T_LIST, $name);
+        $this->buf .= chr(self::T_STRING) . pack('N', count($values));
+        foreach ($values as $v) {
+            $this->buf .= pack('n', strlen($v)) . $v;
+        }
+        return $this;
+    }
+
     /** Вставляет уже готовый body корневого компаунда (без type+имени). */
     public function rawCompoundBody(string $rootNbt): self
     {
@@ -1019,10 +1029,7 @@ final class RegistryData
                         ->int('logical_height', 384)
                         ->string('infiniburn', '#minecraft:infiniburn_overworld')
                         ->string('effects', 'minecraft:overworld')
-                        ->compound('monster_spawn_light_level', function (Nbt $ms): void {
-                            $ms->string('type', 'minecraft:constant')
-                                ->int('value', 0);
-                        })
+                        ->int('monster_spawn_light_level', 0)
                         ->int('monster_spawn_block_light_limit', 0);
                 })
                     ->int('id', 0)
@@ -1125,22 +1132,20 @@ final class RegistryData
     {
         return [
             static function (Nbt $n): void {
+                // id и name — на верхнем уровне записи реестра
                 $n->int('id', 0)
                     ->string('name', 'minecraft:chat')
                     ->compound('element', function (Nbt $e): void {
+                        // chat: плоская структура без 'decoration'
                         $e->compound('chat', function (Nbt $chat): void {
-                            $chat->compound('decoration', function (Nbt $dec): void {
-                                $dec->string('translation_key', 'chat.type.text')
-                                    ->listCompound('parameters', [
-                                        static function (Nbt $p): void {
-                                            $p->string('text', 'sender');
-                                        },
-                                        static function (Nbt $p): void {
-                                            $p->string('text', 'content');
-                                        },
-                                    ]);
+                            $chat->string('translation_key', 'chat.type.text')
+                                ->listString('parameters', ['sender', 'content']);
+                        })
+                            // narration: та же структура (клиент 1.20.1 ожидает оба поля)
+                            ->compound('narration', function (Nbt $nar): void {
+                                $nar->string('translation_key', 'chat.type.text.narrate')
+                                    ->listString('parameters', ['sender', 'content']);
                             });
-                        });
                     });
             },
         ];
