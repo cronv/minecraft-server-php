@@ -182,10 +182,18 @@ final class PacketId
     public const CB_PLAY_PLAYER_COMBAT_END = 0x34;
     public const CB_PLAY_PLAYER_COMBAT_ENTER = 0x35;
     public const CB_PLAY_PLAYER_COMBAT_KILL = 0x36;
+    /** Protocol 763: Remove Player Info (Player Info Remove) — 0x37. */
     public const CB_PLAY_PLAYER_INFO_REMOVE = 0x37;
-    public const CB_PLAY_PLAYER_INFO_UPDATE = 0x38;
+    /**
+     * Protocol 763 (эталон minecraft-data / wiki.vg): Player Info Update — 0x3A.
+     * БЫЛО ошибочно 0x38 (в 763 это «Update Mob Effect») — клиент парсил
+     * пакет с неверным ID и возникало смещение байт («... larger than expected»).
+     */
+    public const CB_PLAY_PLAYER_INFO_UPDATE = 0x3A;          // БЫЛО 0x38, СТАЛО 0x3A
+    /** Protocol 763: Look At (Set Camera Target) — 0x39. */
     public const CB_PLAY_PLAYER_LOOK_AT = 0x39;
-    public const CB_PLAY_PLAYER_POSITION = 0x3A;
+    /** Protocol 763: Position and Teleport Entity (Teleport) — 0x46 (БЫЛО 0x3A). */
+    public const CB_PLAY_PLAYER_POSITION = 0x46;
     public const CB_PLAY_RECIPE_BOOK_ADD = 0x3B;
     public const CB_PLAY_RECIPE_BOOK_REMOVE = 0x3C;
     public const CB_PLAY_RECIPE_BOOK_SETTINGS = 0x3D;
@@ -197,7 +205,8 @@ final class PacketId
     public const CB_PLAY_SECTION_BLOCKS_UPDATE = 0x43;
     public const CB_PLAY_SELECT_ADVANCEMENTS_TAB = 0x44;
     public const CB_PLAY_SERVER_DATA = 0x45;
-    public const CB_PLAY_SET_ACTION_BAR_TEXT = 0x46;
+    /** Protocol 763: Set Action Bar Text — 0x45 (БЫЛО ошибочно 0x46, там Teleport). */
+    public const CB_PLAY_SET_ACTION_BAR_TEXT = 0x45;
     public const CB_PLAY_SET_BORDER_CENTER = 0x47;
     public const CB_PLAY_SET_BORDER_LERP_SIZE = 0x48;
     public const CB_PLAY_SET_BORDER_SIZE = 0x49;
@@ -354,12 +363,12 @@ final class PacketId
     public const PLAY_WORLD_EVENTS = self::CB_PLAY_LEVEL_EVENT;                  // 0x24
     public const PLAY_SECTION_BLOCKS_UPDATE = self::CB_PLAY_SECTION_BLOCKS_UPDATE; // 0x43
     public const PLAY_SYSTEM_CHAT_MESSAGE = self::CB_PLAY_SYSTEM_CHAT;           // 0x65
-    public const PLAY_PLAYER_INFO = self::CB_PLAY_PLAYER_INFO_UPDATE;            // 0x38
+    public const PLAY_PLAYER_INFO = self::CB_PLAY_PLAYER_INFO_UPDATE;            // 0x3A (БЫЛО 0x38)
     public const PLAY_LIMITED_PACKET_SIZE = self::CB_PLAY_SERVER_DATA;           // 0x45
     public const PLAY_SET_TITLE_TEXT = self::CB_PLAY_SET_TITLE_TEXT;             // 0x5F
     public const PLAY_ADD_PLAYER = self::CB_PLAY_ADD_PLAYER;                     // 0x03
     public const PLAY_JOIN_GAME = self::CB_PLAY_LOGIN;                           // 0x29 (Join Game, Protocol 763)
-    public const PLAY_PLAYER_POSITION = self::CB_PLAY_PLAYER_POSITION;           // 0x3A
+    public const PLAY_PLAYER_POSITION = self::CB_PLAY_PLAYER_POSITION;           // 0x46 (БЫЛО 0x3A)
     public const PLAY_PLAYER_ABILITIES = self::CB_PLAY_PLAYER_ABILITIES;         // 0x32
     public const PLAY_PLAYER_COMPOSITION = self::CB_PLAY_SET_EQUIPMENT;          // 0x55
     public const PLAY_SET_HEALTH = self::CB_PLAY_SET_HEALTH;                     // 0x57
@@ -369,7 +378,7 @@ final class PacketId
     public const PLAY_SIMULATION_DISTANCE = self::CB_PLAY_SET_SIMULATION_DISTANCE; // 0x5C
     public const PLAY_POSITION_SYNC = self::CB_PLAY_MOVE_ENTITY_POS;             // 0x2A
     public const PLAY_SET_SLOT = self::CB_PLAY_CONTAINER_SET_SLOT;               // 0x16
-    public const PLAY_ACTIONBAR_TEXT = self::CB_PLAY_SET_ACTION_BAR_TEXT;        // 0x46
+    public const PLAY_ACTIONBAR_TEXT = self::CB_PLAY_SET_ACTION_BAR_TEXT;        // 0x45
     public const PLAY_SET_DEFAULT_SPAWN_POSITION = self::CB_PLAY_SET_DEFAULT_SPAWN_POSITION; // 0x50
     public const PLAY_MAP_ID = self::CB_PLAY_MAP_ITEM_DATA;                      // 0x28
     public const PLAY_REQUEST_PERMISSIONS = self::CB_PLAY_SET_CAMERA;            // 0x4C
@@ -386,7 +395,7 @@ final class PacketId
     public const PLAY_OPEN_SCREEN = self::CB_PLAY_OPEN_SCREEN;                    // 0x2E
     public const PLAY_CONTAINER_PROPERTY = self::CB_PLAY_CONTAINER_SET_DATA;      // 0x15
     public const PLAY_DELETE_ENTITY = self::CB_PLAY_REMOVE_ENTITIES;              // 0x3E
-    public const PLAY_CHANGE_GAME_MODE = self::CB_PLAY_PLAYER_INFO_UPDATE;        // 0x38 (нет отдельного пакета в 763)
+    public const PLAY_CHANGE_GAME_MODE = self::CB_PLAY_PLAYER_INFO_UPDATE;        // 0x3A (нет отдельного пакета в 763)
     public const PLAY_SET_COOLDOWN = self::CB_PLAY_COOLDOWN;                      // 0x17
     public const PLAY_CUSTOM_PAYLOAD = self::CB_PLAY_CUSTOM_PAYLOAD;              // 0x19
     public const PLAY_STOP_SOUND = self::CB_PLAY_STOP_SOUND;                      // 0x63
@@ -396,7 +405,7 @@ final class PacketId
     public const PLAY_DIFFICULTY = self::PLAY_SERVER_DIFFICULTY;                 // 0x0C
     public const PLAY_UPDATE_TIME = self::PLAY_TIME_UPDATE;                      // 0x5E
     public const PLAY_SPAWN_POSITION = self::PLAY_SET_DEFAULT_SPAWN_POSITION;    // 0x50
-    public const PLAY_POSITION = self::PLAY_PLAYER_POSITION;                     // 0x3A
+    public const PLAY_POSITION = self::PLAY_PLAYER_POSITION;                     // 0x46
     public const PLAY_ABILITIES = self::PLAY_PLAYER_ABILITIES;                   // 0x32
     public const PLAY_HELD_ITEM_SLOT = self::PLAY_HELD_ITEM_CHANGE;              // 0x4D
     public const PLAY_UPDATE_HEALTH = self::PLAY_SET_HEALTH;                     // 0x57
@@ -543,8 +552,8 @@ final class PacketLogger
             0x2A => 'CB Play: Move Entity Pos',
             0x32 => 'CB Play: Player Abilities',
             0x37 => 'CB Play: Player Info Remove',
-            0x38 => 'CB Play: Player Info Update (Add)',
-            0x3A => 'CB Play: Player Position (Teleport)',
+            0x3A => 'CB Play: Player Info Update (Add)',   // БЫЛО ошибочно приписано 0x38
+            0x46 => 'CB Play: Position And Teleport Entity (Teleport)', // БЫЛО ошибочно 0x3A
             0x4D => 'CB Play: Set Carried Item (Held Item Change)',
             0x50 => 'CB Play: Set Default Spawn Position',
             0x56 => 'CB Play: Set Experience',
@@ -1278,7 +1287,7 @@ final class PacketFactory
         return $data;
     }
 
-    /** Player Info (play S2C 0x3A): action bitflags=0x01 (add_player), 1 игрок. */
+    /** Player Info Update (play S2C 0x3A): actions bitflags=0x01 (add_player), 1 игрок. */
     public function createPlayerInfoAdd(string $uuid, string $username): string
     {
         return chr(0x01)                             // actions bitflags: add_player
@@ -1446,7 +1455,7 @@ final class PacketFactory
 
     /** Named Entity Spawn (0x03) не нужен; вместо него клиент сам рендерит себя. */
 
-    /** Position and Teleport (play S2C 0x3C): x,y,z f64 + yaw,pitch f32 + flags i8 + teleportId varint. */
+    /** Position and Teleport (play S2C 0x46): x,y,z f64 + yaw,pitch f32 + flags i8 + teleportId varint. */
     public function createPlayerPosition(float $x, float $y, float $z): string
     {
         $teleportId = ++$this->teleportIdCounter;
@@ -1502,7 +1511,7 @@ final class PacketFactory
         return StringHandler::write((string) json_encode(['text' => $text], JSON_UNESCAPED_UNICODE)) . chr(0);
     }
 
-    /** Action Bar (play S2C 0x46): text component string. */
+    /** Action Bar (play S2C 0x45): text component string. */
     public function createActionBar(string $text): string
     {
         return StringHandler::write((string) json_encode(['text' => $text], JSON_UNESCAPED_UNICODE));
@@ -2325,7 +2334,7 @@ final class MinecraftServer
             'SB_CONFIG_ACKNOWLEDGE_FINISH_CONFIGURATION' => 0x02,
             'CB_PLAY_LOGIN' => 0x29,
             'CB_PLAY_SET_CONTAINER_CONTENT' => 0x27,
-            'CB_PLAY_PLAYER_POSITION' => 0x3A,
+            'CB_PLAY_PLAYER_POSITION' => 0x46,
             'CB_PLAY_KEEP_ALIVE' => 0x22,
             'CB_PLAY_LEVEL_CHUNK_WITH_LIGHT' => 0x23,
             'CB_PLAY_SYSTEM_CHAT' => 0x65,
@@ -2638,7 +2647,7 @@ final class MinecraftServer
                 PacketId::PLAY_PLAYER_INFO,
                 $this->packetFactory->createPlayerInfoAdd($connection->uuid, $connection->username)
             );
-            PacketLogger::logInfo("Player Info Add (0x38) отправлен клиенту $clientId");
+            PacketLogger::logInfo("Player Info Add (0x3A) отправлен клиенту $clientId");
 
             $this->connectionManager->sendPacket(
                 $clientId,
@@ -2663,7 +2672,7 @@ final class MinecraftServer
                 PacketId::PLAY_POSITION,
                 $this->packetFactory->createPlayerPosition($spawn['x'], $spawn['y'], $spawn['z'])
             );
-            PacketLogger::logInfo("Position (teleport, 0x3A) отправлен клиенту $clientId");
+            PacketLogger::logInfo("Position (teleport, 0x46) отправлен клиенту $clientId");
 
             $this->connectionManager->sendPacket(
                 $clientId,
