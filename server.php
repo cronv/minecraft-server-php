@@ -1002,26 +1002,29 @@ final class RegistryData
     public static function dimensionEntries(): array
     {
         return [
-            static function (Nbt $e): void {
-                // Вставляем поля overworld напрямую (без обертки Compound)
-                // listCompound сам добавит 0x0A в начале и 0x00 в конце
-                $e->byte('ultrawarm', 0)
-                    ->byte('natural', 1)
-                    ->double('coordinate_scale', 1.0)
-                    ->double('ambient_light', 0.0)
-                    ->byte('has_ceiling', 0)
-                    ->byte('has_skylight', 1)
-                    ->byte('piglin_safe', 0)
-                    ->byte('bed_works', 1)
-                    ->byte('respawn_anchor_works', 0)
-                    ->byte('has_raids', 1)
-                    ->int('min_y', -64)
-                    ->int('height', 384)
-                    ->int('logical_height', 384)
-                    ->string('infiniburn', '#minecraft:infiniburn_overworld')
-                    ->string('effects', 'minecraft:overworld')
-                    ->int('monster_spawn_light_level', 0)
-                    ->int('monster_spawn_block_light_limit', 0)
+            static function (Nbt $n): void {
+                $n->compound('element', function (Nbt $e): void {
+                    $e->byte('ultrawarm', 0)
+                        ->byte('natural', 1)
+                        ->double('coordinate_scale', 1.0)
+                        ->float('ambient_light', 0.0) // в вики это Float, не Double
+                        ->byte('has_ceiling', 0)
+                        ->byte('has_skylight', 1)
+                        ->byte('piglin_safe', 0)
+                        ->byte('bed_works', 1)
+                        ->byte('respawn_anchor_works', 0)
+                        ->byte('has_raids', 1)
+                        ->int('min_y', -64)
+                        ->int('height', 384)
+                        ->int('logical_height', 384)
+                        ->string('infiniburn', '#minecraft:infiniburn_overworld')
+                        ->string('effects', 'minecraft:overworld')
+                        ->compound('monster_spawn_light_level', function (Nbt $ms): void {
+                            $ms->string('type', 'minecraft:constant')
+                                ->int('value', 0);
+                        })
+                        ->int('monster_spawn_block_light_limit', 0);
+                })
                     ->int('id', 0)
                     ->string('name', 'minecraft:overworld');
             },
@@ -1108,11 +1111,39 @@ final class RegistryData
 
         // ИСПОЛЬЗУЕМ networkRoot вместо root
         self::$dimensionCodec = Nbt::networkRoot(function (Nbt $n): void {
-            $n->listCompound('minecraft:dimension_type', self::dimensionEntries())
-                ->listCompound('minecraft:worldgen/biome', self::biomeEntries());
+            $n
+                ->listCompound('minecraft:dimension_type', self::dimensionEntries())
+                ->listCompound('minecraft:worldgen/biome', self::biomeEntries())
+                ->listCompound('minecraft:chat_type', self::chatEntries())
+            ;
         });
 
         return self::$dimensionCodec;
+    }
+
+    public static function chatEntries(): array
+    {
+        return [
+            static function (Nbt $n): void {
+                $n->int('id', 0)
+                    ->string('name', 'minecraft:chat')
+                    ->compound('element', function (Nbt $e): void {
+                        $e->compound('chat', function (Nbt $chat): void {
+                            $chat->compound('decoration', function (Nbt $dec): void {
+                                $dec->string('translation_key', 'chat.type.text')
+                                    ->listCompound('parameters', [
+                                        static function (Nbt $p): void {
+                                            $p->string('text', 'sender');
+                                        },
+                                        static function (Nbt $p): void {
+                                            $p->string('text', 'content');
+                                        },
+                                    ]);
+                            });
+                        });
+                    });
+            },
+        ];
     }
 
     private function __construct()
@@ -1386,7 +1417,10 @@ final class PacketFactory
     /** Spawn Position (play S2C 0x50): position(long) + angle f32. */
     public function createSpawnPosition(int $x, int $y, int $z): string
     {
-        return pack('J', self::encodeBlockPosition($x, $y, $z)) . pack('G', 0.0);
+        return StringHandler::write('minecraft:overworld') // Dimension Name
+            . pack('J', self::encodeBlockPosition($x, $y, $z)) // Location
+            . pack('G', 0.0) // Yaw
+            . pack('G', 0.0); // Pitch
     }
 
     /** Named Entity Spawn (0x03) не нужен; вместо него клиент сам рендерит себя. */
