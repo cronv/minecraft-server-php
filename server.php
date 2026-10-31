@@ -1014,13 +1014,16 @@ final class RegistryData
     {
         return [
             static function (Nbt $n): void {
+                // Эталон 1.20.1 (MCP packet_login / registry dimension_type):
+                // ambient_light = FLOAT, fixed_time = LONG, effects = STRING.
                 $n->compound('element', function (Nbt $e): void {
                     $e->byte('ultrawarm', 0)
                         ->byte('natural', 1)
                         ->double('coordinate_scale', 1.0)
-                        ->float('ambient_light', 0.0) // в вики это Float, не Double
+                        ->float('ambient_light', 0.0)
                         ->byte('has_ceiling', 0)
                         ->byte('has_skylight', 1)
+                        ->long('fixed_time', 6000)
                         ->byte('piglin_safe', 0)
                         ->byte('bed_works', 1)
                         ->byte('respawn_anchor_works', 0)
@@ -1028,15 +1031,9 @@ final class RegistryData
                         ->int('min_y', -64)
                         ->int('height', 384)
                         ->int('logical_height', 384)
-                        ->string('infiniburn', '#minecraft:infiniburn_overworld')
                         ->string('effects', 'minecraft:overworld')
-                        ->compound('monster_spawn_light_level', function (Nbt $ms): void {
-                            $ms->string('type', 'minecraft:uniform')
-                                ->compound('value', function (Nbt $v): void {
-                                    $v->int('min_inclusive', 0)
-                                        ->int('max_inclusive', 7); // для overworld обычно 0-7
-                                });
-                        })
+                        ->string('infiniburn', '#minecraft:infiniburn_overworld')
+                        ->int('monster_spawn_light_level', 0)
                         ->int('monster_spawn_block_light_limit', 0);
                 })
                     ->int('id', 0)
@@ -1082,6 +1079,45 @@ final class RegistryData
         };
     }
 
+    /**
+     * Записи реестра minecraft:chat_type (1.20.1). Клиент ОБЯЗАН получить
+     * этот реестр в dimensionCodec — иначе ошибка парсинга реестров.
+     *
+     * Эталон vanilla-датпака 1.20.1 (data/minecraft/chat_type/*.json):
+     * element = { chat: {translation_key, parameters},
+     *             narration: {translation_key, parameters} }
+     *
+     * @return array<int, callable>
+     */
+    public static function chatTypeEntries(): array
+    {
+        $mk = static function (int $id, string $name, string $chatTk, array $chatParams, string $narTk, array $narParams): callable {
+            return static function (Nbt $n) use ($id, $name, $chatTk, $chatParams, $narTk, $narParams): void {
+                $n->compound('element', function (Nbt $e) use ($chatTk, $chatParams, $narTk, $narParams): void {
+                    $e->compound('chat', function (Nbt $c) use ($chatTk, $chatParams): void {
+                        $c->string('translation_key', $chatTk)
+                            ->listString('parameters', $chatParams);
+                    })
+                        ->compound('narration', function (Nbt $nr) use ($narTk, $narParams): void {
+                            $nr->string('translation_key', $narTk)
+                                ->listString('parameters', $narParams);
+                        });
+                })
+                    ->int('id', $id)
+                    ->string('name', 'minecraft:' . $name);
+            };
+        };
+
+        return [
+            $mk(0, 'chat', 'chat.type.text', ['sender', 'content'],
+                    'chat.type.text.narrate', ['sender', 'content']),
+            $mk(1, 'say_command', 'commands.say.message', ['sender', 'content'],
+                    'commands.say.message', ['sender', 'content']),
+            $mk(2, 'player_command', 'commands.me.message', ['sender', 'content'],
+                    'commands.me.message', ['sender', 'content']),
+        ];
+    }
+
     /** Корневой NBT одной записи dimension_type (overworld, 1.20.1). */
     public static function overworldDimension(): string
     {
@@ -1092,9 +1128,10 @@ final class RegistryData
                 $e->byte('ultrawarm', 0)
                     ->byte('natural', 1)
                     ->double('coordinate_scale', 1.0)
-                    ->double('ambient_light', 0.0)
+                    ->float('ambient_light', 0.0) // FLOAT, не double (эталон 1.20.1)
                     ->byte('has_ceiling', 0)
                     ->byte('has_skylight', 1)
+                    ->long('fixed_time', 6000)    // LONG
                     ->byte('piglin_safe', 0)
                     ->byte('bed_works', 1)
                     ->byte('respawn_anchor_works', 0)
@@ -1113,9 +1150,9 @@ final class RegistryData
     }
 
     /**
-     * Payload пакета Sync Registries (play S2C 0x39 в 1.20.1 отсутствует —
-     * реестры идут целиком в dimensionCodec пакета Join Game, поэтому здесь
-     * собирается именно codec). Возвращает кэш (Flyweight).
+     * dimensionCodec пакета Join Game (play S2C 0x29, Protocol 763).
+     * В 1.20.1 реестры dimension_type, worldgen/biome и chat_type
+     * передаются клиенту именно здесь. Возвращает кэш (Flyweight).
      */
     public static function dimensionCodec(): string
     {
@@ -1136,36 +1173,14 @@ final class RegistryData
                     ->listCompound('value', self::biomeEntries());
             });
 
-            // 3. Типы чата: TAG_Compound с type и value
+            // 3. Типы чата: обязательны в 1.20.1 (клиент крашит вход без них)
             $n->compound('minecraft:chat_type', function (Nbt $reg): void {
                 $reg->string('type', 'minecraft:chat_type')
-                    ->listCompound('value', self::chatEntries());
+                    ->listCompound('value', self::chatTypeEntries());
             });
         });
 
         return self::$dimensionCodec;
-    }
-
-    public static function chatEntries(): array
-    {
-        return [
-            static function (Nbt $n): void {
-                $n->int('id', 0)
-                    ->string('name', 'minecraft:chat')
-                    ->compound('element', function (Nbt $e): void {
-                        // chat: плоская структура без 'decoration'
-                        $e->compound('chat', function (Nbt $chat): void {
-                            $chat->string('translation_key', 'chat.type.text')
-                                ->listString('parameters', ['sender', 'content']); // <-- TAG_String
-                        })
-                            // narration: та же структура
-                            ->compound('narration', function (Nbt $nar): void {
-                                $nar->string('translation_key', 'chat.type.text.narrate')
-                                    ->listString('parameters', ['sender', 'content']);
-                            });
-                    });
-            },
-        ];
     }
 
     private function __construct()
@@ -1246,26 +1261,36 @@ final class PacketFactory
     }
 
     /**
-     * Join Game (play S2C 0x29, protocol 763).
+     * Join Game (play S2C 0x29, protocol 763 / Minecraft 1.20.1).
      *
-     * Порядок полей строго по packet_login из minecraft-data 1.20:
-     * entityId(i32) isHardcore(bool) gameMode(u8) previousGameMode(i8)
-     * worldNames(array<string>) dimensionCodec(nbt) worldType(string)
-     * worldName(string) hashedSeed(i64) maxPlayers(varint) viewDistance(varint)
-     * simulationDistance(varint) reducedDebugInfo(bool) enableRespawnScreen(bool)
-     * isDebug(bool) isFlat(bool) death(option) portalCooldown(varint)
+     * Строго по packet_join_game из wiki.vg / minecraft-data 1.20.1:
+     *   entityId(i32) isHardcore(bool) gameMode(u8) previousGameMode(i8)
+     *   worldNames(VarInt count + String[]) dimensionCodec(NBT)
+     *   dimension(String = реестровый КЛЮЧ типа измерения!)
+     *   worldName(String) hashedSeed(i64) maxPlayers(varint) viewDistance(varint)
+     *   simulationDistance(varint) maxSeenDistance? НЕТ в 763 —
+     *   reducedDebugInfo(bool) enableRespawnScreen(bool) isDebug(bool) isFlat(bool)
+     *   deathLocation(Optional: Bool present + String dim + Pos i64)
+     *   portalCooldown(VarInt)
+     *
+     * ВАЖНО: в 1.20.1 поле "worldType" ОТСУТСТВУЕТ; вместо него идёт
+     * dimension-строка (ключ типа, например "minecraft:overworld").
      */
     public function createJoinGame(int $entityId): string
     {
         $data = pack('N', $entityId & 0xFFFFFFFF);   // entityId (i32, big-endian)
         $data .= chr(0);                              // isHardcore = false
         $data .= chr(1);                              // gameMode u8: 1 = Creative
-        $data .= pack('c', -1);                       // previousGameMode = none
-        $data .= VarInt::write(1) . StringHandler::write('minecraft:overworld'); // worldNames
-        $data .= RegistryData::dimensionCodec();      // dimensionCodec (NBT)
-        $data .= StringHandler::write('minecraft:overworld'); // worldType
-        $data .= StringHandler::write('minecraft:overworld'); // worldName
-        $data .= pack('J', 0);                        // hashedSeed
+        $data .= pack('c', -1);                       // previousGameMode = none (-1)
+        // worldNames: VarInt count + String[]
+        $data .= VarInt::write(1) . StringHandler::write('minecraft:overworld');
+        // dimensionCodec: NBT-реестры (dimension_type, biome, chat_type)
+        $data .= RegistryData::dimensionCodec();
+        // dimension: КЛЮЧ типа измерения (в 1.20.1 это String, НЕ составной тип)
+        $data .= StringHandler::write('minecraft:overworld');
+        // worldName
+        $data .= StringHandler::write('minecraft:overworld');
+        $data .= pack('J', 0);                        // hashedSeed (i64)
         $data .= VarInt::write($this->config->maxPlayers);
         $data .= VarInt::write($this->config->viewDistance);
         $data .= VarInt::write($this->config->simulationDistance);
@@ -1273,7 +1298,7 @@ final class PacketFactory
         $data .= chr(1);                              // enableRespawnScreen
         $data .= chr(0);                              // isDebug
         $data .= chr(0);                              // isFlat
-        $data .= chr(0);                              // death location: absent
+        $data .= chr(0);                              // hasDeathLocation = false (Optional absent)
         $data .= VarInt::write(0);                    // portalCooldown
 
         return $data;
