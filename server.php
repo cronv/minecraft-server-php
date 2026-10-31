@@ -1122,13 +1122,24 @@ final class RegistryData
             return self::$dimensionCodec;
         }
 
-        // ИСПОЛЬЗУЕМ networkRoot вместо root
         self::$dimensionCodec = Nbt::networkRoot(function (Nbt $n): void {
-            $n
-                ->listCompound('minecraft:dimension_type', self::dimensionEntries())
-                ->listCompound('minecraft:worldgen/biome', self::biomeEntries())
-                ->listCompound('minecraft:chat_type', self::chatEntries())
-            ;
+            // 1. Измерения: TAG_Compound с type и value
+            $n->compound('minecraft:dimension_type', function (Nbt $reg): void {
+                $reg->string('type', 'minecraft:dimension_type')
+                    ->listCompound('value', self::dimensionEntries());
+            });
+
+            // 2. Биомы: TAG_Compound с type и value
+            $n->compound('minecraft:worldgen/biome', function (Nbt $reg): void {
+                $reg->string('type', 'minecraft:worldgen/biome')
+                    ->listCompound('value', self::biomeEntries());
+            });
+
+            // 3. Типы чата: TAG_Compound с type и value
+            $n->compound('minecraft:chat_type', function (Nbt $reg): void {
+                $reg->string('type', 'minecraft:chat_type')
+                    ->listCompound('value', self::chatEntries());
+            });
         });
 
         return self::$dimensionCodec;
@@ -1138,18 +1149,19 @@ final class RegistryData
     {
         return [
             static function (Nbt $n): void {
-                // id и name — на верхнем уровне записи реестра
                 $n->int('id', 0)
                     ->string('name', 'minecraft:chat')
                     ->compound('element', function (Nbt $e): void {
+                        // chat: плоская структура без 'decoration'
                         $e->compound('chat', function (Nbt $chat): void {
                             $chat->string('translation_key', 'chat.type.text')
-                                ->primitiveArray('parameters', Nbt::T_INT, [0, 2]); // 0 = sender, 2 = content
+                                ->listString('parameters', ['sender', 'content']); // <-- TAG_String
                         })
-                        ->compound('narration', function (Nbt $nar): void {
-                            $nar->string('translation_key', 'chat.type.text.narrate')
-                                ->primitiveArray('parameters', Nbt::T_INT, [0, 2]);
-                        });
+                            // narration: та же структура
+                            ->compound('narration', function (Nbt $nar): void {
+                                $nar->string('translation_key', 'chat.type.text.narrate')
+                                    ->listString('parameters', ['sender', 'content']);
+                            });
                     });
             },
         ];
