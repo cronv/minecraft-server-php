@@ -131,6 +131,7 @@ final class PacketId
     public const CB_PLAY_ADD_PLAYER = 0x03;
     public const CB_PLAY_ANIMATE = 0x04;
     public const CB_PLAY_AWARD_STATISTICS = 0x05;
+    public const CB_PLAY_REGISTRY_DATA = 0x05;
     public const CB_PLAY_BLOCK_CHANGED_ACK = 0x06;
     public const CB_PLAY_BLOCK_DESTRUCTION = 0x07;
     public const CB_PLAY_BLOCK_ENTITY_DATA = 0x08;
@@ -1281,15 +1282,29 @@ final class PacketFactory
     /** Player Info (play S2C 0x3A): action bitflags=0x01 (add_player), 1 игрок. */
     public function createPlayerInfoAdd(string $uuid, string $username): string
     {
-        return chr(0x01)                             // actions bitflags: add_player
-            . VarInt::write(1)                       // количество игроков
-            . Uuid::toBinary($uuid)
-            . StringHandler::write($username)        // name (game_profile.displayName)
-            . VarInt::write(0)                       // properties: 0
-            . chr(0)                                 // chat session unsupported (bool)
-            . VarInt::write(1)                       // gamemode: creative
-            . VarInt::write(0)                       // ping
-            . chr(0);                                // display name: absent
+        $actions = 0x01 | 0x04 | 0x08 | 0x10; // 0x1D (add_player, game_mode, listed, latency)
+
+        // ИСПРАВЛЕНО: Actions теперь VarInt, а не chr()
+        $data = VarInt::write($actions);
+        $data .= VarInt::write(1);             // Количество игроков
+
+        // UUID (строго 16 байт)
+        $data .= Uuid::toBinary($uuid);
+
+        // --- add_player (0x01) ---
+        $data .= StringHandler::write($username);
+        $data .= VarInt::write(0);             // Свойств (properties) нет
+
+        // --- update_game_mode (0x04) ---
+        $data .= VarInt::write(1);             // Creative
+
+        // --- update_listed (0x08) ---
+        $data .= chr(1);                       // true (Bool)
+
+        // --- update_latency (0x10) ---
+        $data .= VarInt::write(0);             // Ping 0
+
+        return $data;
     }
 
     /** Player Remove (play S2C 0x39): VarInt count + UUID[]. */
