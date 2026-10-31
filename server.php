@@ -151,7 +151,7 @@ final class PacketId
     public const CB_PLAY_CONTAINER_SET_SLOT = 0x16;
     public const CB_PLAY_COOLDOWN = 0x17;
     public const CB_PLAY_CUSTOM_CHAT_COMPLETIONS = 0x18;
-    public const CB_PLAY_CUSTOM_PAYLOAD = 0x19;
+    public const CB_PLAY_CUSTOM_PAYLOAD = 0x18;
     public const CB_PLAY_DAMAGE_EVENT = 0x1A;
     public const CB_PLAY_DELETE_CHAT = 0x1B;
     public const CB_PLAY_DISCONNECT = 0x1C;
@@ -160,7 +160,7 @@ final class PacketId
     public const CB_PLAY_EXPLOSION = 0x1F;
     public const CB_PLAY_FORGET_LEVEL_CHUNK = 0x20;
     public const CB_PLAY_GAME_EVENT = 0x21;
-    public const CB_PLAY_KEEP_ALIVE = 0x22;
+    public const CB_PLAY_KEEP_ALIVE = 0x26;
     public const CB_PLAY_LEVEL_CHUNK_WITH_LIGHT = 0x23;
     public const CB_PLAY_LEVEL_EVENT = 0x24;
     public const CB_PLAY_LEVEL_PARTICLES = 0x25;
@@ -208,7 +208,7 @@ final class PacketId
     public const CB_PLAY_SET_CARRIED_ITEM = 0x4D;
     public const CB_PLAY_SET_CHUNK_CACHE_CENTER = 0x4E;
     public const CB_PLAY_SET_CHUNK_CACHE_RADIUS = 0x4F;
-    public const CB_PLAY_SET_DEFAULT_SPAWN_POSITION = 0x50;
+    public const CB_PLAY_SET_DEFAULT_SPAWN_POSITION = 0x5B;
     public const CB_PLAY_SET_DISPLAY_OBJECTIVE = 0x51;
     public const CB_PLAY_SET_ENTITY_DATA = 0x52;
     public const CB_PLAY_SET_ENTITY_LINK = 0x53;
@@ -1067,7 +1067,6 @@ final class RegistryData
         return static function (Nbt $n) use ($id, $name, $precip, $temp, $down): void {
             $n->compound('element', function (Nbt $e) use ($precip, $temp, $down): void {
                 $e->byte('has_precipitation', $precip)
-                    ->float('depth', 0.125)
                     ->float('temperature', $temp)
                     ->float('downfall', $down)
                     ->compound('effects', function (Nbt $fx): void {
@@ -1263,7 +1262,6 @@ final class PacketFactory
         $data .= pack('c', -1);                       // previousGameMode = none
         $data .= VarInt::write(1) . StringHandler::write('minecraft:overworld'); // worldNames
         $data .= RegistryData::dimensionCodec();      // dimensionCodec (NBT)
-        $data .= StringHandler::write('minecraft:overworld'); // worldType
         $data .= StringHandler::write('minecraft:overworld'); // worldName
         $data .= pack('J', 0);                        // hashedSeed
         $data .= VarInt::write($this->config->maxPlayers);
@@ -1282,7 +1280,7 @@ final class PacketFactory
     /** Player Info (play S2C 0x3A): action bitflags=0x01 (add_player), 1 игрок. */
     public function createPlayerInfoAdd(string $uuid, string $username): string
     {
-        $actions = 0x01 | 0x04 | 0x08 | 0x10; // 0x1D (add_player, game_mode, listed, latency)
+        $actions = 0x01 | 0x02 | 0x04 | 0x08 | 0x10; // 0x1F (add_player, game_mode, listed, latency)
 
         // ИСПРАВЛЕНО: Actions теперь VarInt, а не chr()
         $data = VarInt::write($actions);
@@ -1295,6 +1293,10 @@ final class PacketFactory
         $data .= StringHandler::write($username);
         $data .= VarInt::write(0);             // Свойств (properties) нет
 
+        // --- update_game_mode (0x04) ---
+        $data .= VarInt::write(1);             // Creative
+
+        $data .= chr(0); // chat session: absent (Boolean false)
         // --- update_game_mode (0x04) ---
         $data .= VarInt::write(1);             // Creative
 
@@ -1316,7 +1318,11 @@ final class PacketFactory
     /** Declare Commands (play S2C 0x10): nodes=[], rootIndex=0. */
     public function createDeclareCommands(): string
     {
-        return VarInt::write(0) . VarInt::write(0);
+        // 1 узел (корневой), флаги = 0, количество детей = 0
+        return VarInt::write(1)   // количество узлов
+            . VarInt::write(0)    // корневой индекс
+            . chr(0)              // флаги узла (0)
+            . VarInt::write(0);   // количество детей (0)
     }
 
     /** Game Event (play S2C 0x1F): reason(u8) + value(f32). 13 = start waiting for chunks. */
@@ -1453,10 +1459,9 @@ final class PacketFactory
     /** Spawn Position (play S2C 0x50): position(long) + angle f32. */
     public function createSpawnPosition(int $x, int $y, int $z): string
     {
-        return StringHandler::write('minecraft:overworld') // Dimension Name
-            . pack('J', self::encodeBlockPosition($x, $y, $z)) // Location
-            . pack('G', 0.0) // Yaw
-            . pack('G', 0.0); // Pitch
+        return StringHandler::write('minecraft:overworld')
+            . pack('J', self::encodeBlockPosition($x, $y, $z))
+            . pack('G', 0.0); // Angle (один float)
     }
 
     /** Named Entity Spawn (0x03) не нужен; вместо него клиент сам рендерит себя. */
@@ -1467,10 +1472,10 @@ final class PacketFactory
         $teleportId = ++$this->teleportIdCounter;
 
         return pack('E', $x) . pack('E', $y) . pack('E', $z)
-            . pack('G', 0.0)             // yaw
-            . pack('G', 0.0)             // pitch
-            . chr(0)                     // flags: абсолютная позиция
-            . VarInt::write($teleportId);
+            . pack('G', 0.0) . pack('G', 0.0)
+            . chr(0) // flags
+            . VarInt::write($teleportId)
+            . chr(0); // Dismount Vehicle (Boolean)
     }
 
     /** Текущий ожидаемый teleport id (для подтверждения клиентом). */
@@ -1532,7 +1537,7 @@ final class PacketFactory
 
     public function createPluginMessageBrand(): string
     {
-        return StringHandler::write('MC|Brand') . StringHandler::write('vanilla');
+        return StringHandler::write('minecraft:brand') . StringHandler::write('vanilla');
     }
 
     /** Кодирование Block Position (протокол): ((x&0x3FFFFFF)<<38)|((z&0x3FFFFFF)<<12)|(y&0xFFF). */
@@ -2341,7 +2346,7 @@ final class MinecraftServer
             'CB_PLAY_LOGIN' => 0x29,
             'CB_PLAY_SET_CONTAINER_CONTENT' => 0x27,
             'CB_PLAY_PLAYER_POSITION' => 0x3A,
-            'CB_PLAY_KEEP_ALIVE' => 0x22,
+            'CB_PLAY_KEEP_ALIVE' => 0x26,
             'CB_PLAY_LEVEL_CHUNK_WITH_LIGHT' => 0x23,
             'CB_PLAY_SYSTEM_CHAT' => 0x65,
             'SB_PLAY_ACCEPT_TELEPORTATION' => 0x00,
