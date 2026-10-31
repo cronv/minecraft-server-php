@@ -1029,7 +1029,13 @@ final class RegistryData
                         ->int('logical_height', 384)
                         ->string('infiniburn', '#minecraft:infiniburn_overworld')
                         ->string('effects', 'minecraft:overworld')
-                        ->int('monster_spawn_light_level', 0)
+                        ->compound('monster_spawn_light_level', function (Nbt $ms): void {
+                            $ms->string('type', 'minecraft:uniform')
+                                ->compound('value', function (Nbt $v): void {
+                                    $v->int('min_inclusive', 0)
+                                        ->int('max_inclusive', 7); // для overworld обычно 0-7
+                                });
+                        })
                         ->int('monster_spawn_block_light_limit', 0);
                 })
                     ->int('id', 0)
