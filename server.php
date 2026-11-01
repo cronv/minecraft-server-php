@@ -208,7 +208,7 @@ final class PacketId
     public const CB_PLAY_SET_CARRIED_ITEM = 0x4D;
     public const CB_PLAY_SET_CHUNK_CACHE_CENTER = 0x4E;
     public const CB_PLAY_SET_CHUNK_CACHE_RADIUS = 0x4F;
-    public const CB_PLAY_SET_DEFAULT_SPAWN_POSITION = 0x5B;
+    public const CB_PLAY_SET_DEFAULT_SPAWN_POSITION = 0x5A;
     public const CB_PLAY_SET_DISPLAY_OBJECTIVE = 0x51;
     public const CB_PLAY_SET_ENTITY_DATA = 0x52;
     public const CB_PLAY_SET_ENTITY_LINK = 0x53;
@@ -1014,27 +1014,36 @@ final class RegistryData
     {
         return [
             static function (Nbt $n): void {
-                $n->compound('element', function (Nbt $e): void {
-                    $e->byte('ultrawarm', 0)
-                        ->byte('natural', 1)
-                        ->double('coordinate_scale', 1.0)
-                        ->float('ambient_light', 0.0)
-                        ->byte('has_ceiling', 0)
-                        ->byte('has_skylight', 1)
-                        ->byte('piglin_safe', 0)
-                        ->byte('bed_works', 1)
-                        ->byte('respawn_anchor_works', 0)
-                        ->byte('has_raids', 1)
-                        ->int('min_y', -64)
-                        ->int('height', 384)
-                        ->int('logical_height', 384)
-                        ->string('infiniburn', '#minecraft:infiniburn_overworld')
-                        ->string('effects', 'minecraft:overworld')
-                        ->int('monster_spawn_light_level', 7)
-                        ->int('monster_spawn_block_light_limit', 0);
-                })
-                    ->int('id', 0)
-                    ->string('name', 'minecraft:overworld');
+                $n->int('id', 0)
+                    ->string('name', 'minecraft:overworld')
+                    ->compound('element', function (Nbt $e): void {
+                        $e->byte('ultrawarm', 0)
+                            ->byte('natural', 1)
+                            ->double('coordinate_scale', 1.0)
+                            ->float('ambient_light', 0.0)
+                            ->byte('has_ceiling', 0)
+                            ->byte('has_skylight', 1)
+                            ->byte('piglin_safe', 0)
+                            ->byte('bed_works', 1)
+                            ->byte('respawn_anchor_works', 0)
+                            ->byte('has_raids', 1)
+                            ->int('min_y', -64)
+                            ->int('height', 384)
+                            ->int('logical_height', 384)
+                            ->string('infiniburn', '#minecraft:infiniburn_overworld')
+                            ->string('effects', 'minecraft:overworld')
+
+                            // ИСПРАВЛЕНИЕ: IntProvider (Compound) вместо простого Int!
+                            ->compound('monster_spawn_light_level', function (Nbt $p): void {
+                                $p->string('type', 'minecraft:uniform')
+                                    ->compound('value', function (Nbt $v): void {
+                                        $v->int('min_inclusive', 0)
+                                            ->int('max_inclusive', 7);
+                                    });
+                            })
+
+                            ->int('monster_spawn_block_light_limit', 0);
+                    });
             },
         ];
     }
@@ -1054,8 +1063,8 @@ final class RegistryData
     public static function biomeEntryCallback(int $id, array $biome): callable
     {
         $name = $biome['name'];
-        // ИСПРАВЛЕНО: В 1.19.3+ precipitation это строка ("none", "rain", "snow")
-        $precip = $biome['precipitation'] ? 'rain' : 'none';
+        // В 1.20.1 это снова Byte (0 или 1), а не строка!
+        $precip = $biome['precipitation'] ? 1 : 0;
         $temp = $biome['temperature'];
         $down = $biome['downfall'];
 
@@ -1063,7 +1072,7 @@ final class RegistryData
             $n->int('id', $id)
                 ->string('name', 'minecraft:' . $name)
                 ->compound('element', function (Nbt $e) use ($precip, $temp, $down): void {
-                    $e->string('precipitation', $precip) // Строка вместо byte!
+                    $e->byte('has_precipitation', $precip) // Byte!
                     ->float('temperature', $temp)
                         ->float('downfall', $down)
                         ->compound('effects', function (Nbt $fx): void {
@@ -1119,78 +1128,105 @@ final class RegistryData
             return self::$dimensionCodec;
         }
 
-        // Для Join Game (1.16 - 1.20.1) структура плоская: списки лежат напрямую в корне
+        // В 1.19.3 - 1.20.1 структура ОБЕРНУТА в type/value!
         self::$dimensionCodec = Nbt::networkRoot(function (Nbt $n): void {
-            $n->listCompound('minecraft:dimension_type', self::dimensionEntries())
-                ->listCompound('minecraft:worldgen/biome', self::biomeEntries());
+            $n->compound('minecraft:dimension_type', function (Nbt $reg): void {
+                $reg->string('type', 'minecraft:dimension_type')
+                    ->listCompound('value', self::dimensionEntries());
+            });
+            $n->compound('minecraft:worldgen/biome', function (Nbt $reg): void {
+                $reg->string('type', 'minecraft:worldgen/biome')
+                    ->listCompound('value', self::biomeEntries());
+            });
         });
 
         return self::$dimensionCodec;
     }
 
-    /** @return array<int, callable> 7 записей chat_type для 1.20.1 */
-    private static function chatTypeEntries(): array
+    public static function getDimensionTypeEntries(): array
     {
-        $types = [
-            ['id' => 0, 'name' => 'minecraft:chat', 'chat_key' => 'chat.type.text', 'narration_key' => 'chat.type.text.narrate'],
-            ['id' => 1, 'name' => 'minecraft:emote_command', 'chat_key' => 'chat.type.emote', 'narration_key' => 'chat.type.emote'],
-            ['id' => 2, 'name' => 'minecraft:msg_command_incoming', 'chat_key' => 'commands.message.display.incoming', 'narration_key' => 'chat.type.text.narrate'],
-            ['id' => 3, 'name' => 'minecraft:msg_command_outgoing', 'chat_key' => 'commands.message.display.outgoing', 'narration_key' => 'chat.type.text.narrate'],
-            ['id' => 4, 'name' => 'minecraft:say_command', 'chat_key' => 'chat.type.announcement', 'narration_key' => 'chat.type.text.narrate'],
-            ['id' => 5, 'name' => 'minecraft:team_msg_command_incoming', 'chat_key' => 'chat.type.team.text', 'narration_key' => 'chat.type.text.narrate'],
-            ['id' => 6, 'name' => 'minecraft:team_msg_command_outgoing', 'chat_key' => 'chat.type.team.sent', 'narration_key' => 'chat.type.text.narrate'],
-        ];
-
-        $callbacks = [];
-        foreach ($types as $t) {
-            $callbacks[] = static function (Nbt $n) use ($t): void {
-                $n->int('id', $t['id'])
-                    ->string('name', $t['name'])
-                    ->compound('element', function (Nbt $e) use ($t): void {
-                        $e->compound('chat', function (Nbt $c) use ($t): void {
-                            $c->string('translation_key', $t['chat_key'])
-                                ->listString('parameters', ['sender', 'content']);
-                        })
-                            ->compound('narration', function (Nbt $na) use ($t): void {
-                                $na->string('translation_key', $t['narration_key'])
-                                    ->listString('parameters', ['sender', 'content']);
+        return [
+            'minecraft:overworld' => Nbt::networkRoot(function (Nbt $n): void {
+                $n->byte('ultrawarm', 0)
+                    ->byte('natural', 1)
+                    ->double('coordinate_scale', 1.0)
+                    ->float('ambient_light', 0.0)
+                    ->byte('has_ceiling', 0)
+                    ->byte('has_skylight', 1)
+                    ->byte('piglin_safe', 0)
+                    ->byte('bed_works', 1)
+                    ->byte('respawn_anchor_works', 0)
+                    ->byte('has_raids', 1)
+                    ->int('min_y', -64)
+                    ->int('height', 384)
+                    ->int('logical_height', 384)
+                    ->string('infiniburn', '#minecraft:infiniburn_overworld')
+                    ->string('effects', 'minecraft:overworld')
+                    ->compound('monster_spawn_light_level', function (Nbt $p): void {
+                        $p->string('type', 'minecraft:uniform')
+                            ->compound('value', function (Nbt $v): void {
+                                $v->int('min_inclusive', 0)->int('max_inclusive', 7);
                             });
-                    });
-            };
-        }
-        return $callbacks;
+                    })
+                    ->int('monster_spawn_block_light_limit', 0);
+            })
+        ];
     }
 
-    /** @return array<int, callable> 49 записей damage_type для 1.20.1 */
-    private static function damageTypeEntries(): array
+    public static function getBiomeEntries(): array
     {
-        $names = [
-            'arrow', 'bad_respawn_point', 'cactus', 'campfire', 'cramming',
-            'dragon_breath', 'drown', 'dry_out', 'ender_pearl', 'explosion',
-            'fall', 'falling_anvil', 'falling_block', 'falling_stalactite',
-            'fireball', 'fireworks', 'fly_into_wall', 'freeze', 'generic',
-            'hot_floor', 'in_fire', 'in_wall', 'indirect_magic', 'lava',
-            'lightning_bolt', 'magic', 'mob_attack', 'mob_attack_no_aggro',
-            'mob_projectile', 'on_fire', 'out_of_world', 'outside_border',
-            'player_attack', 'player_explosion', 'sonic_boom', 'stalagmite',
-            'starve', 'sting', 'sweet_berry_bush', 'thorns', 'thrown',
-            'trident', 'unattributed_fireball', 'wither', 'wither_skull',
-            'wither_skull_dangerous', 'sulfur_cube_hot', 'sulfur_cube',
-            'wind_charge',
-        ];
+        $entries = [];
+        foreach (self::BIOMES as $biome) {
+            $name = 'minecraft:' . $biome['name'];
+            $precip = $biome['precipitation'] ? 'rain' : 'none';
+            $temp = $biome['temperature'];
+            $down = $biome['downfall'];
 
-        $callbacks = [];
-        foreach ($names as $id => $name) {
-            $callbacks[] = static function (Nbt $n) use ($id, $name): void {
-                $n->int('id', $id)
-                    ->string('name', 'minecraft:' . $name)
-                    ->compound('element', function (Nbt $e) use ($name): void {
-                        $e->string('message_id', $name)
-                            ->string('scaling', 'when_caused_by_living_non_player');
+            $entries[$name] = Nbt::networkRoot(function (Nbt $n) use ($precip, $temp, $down): void {
+                $n->string('precipitation', $precip)
+                    ->float('temperature', $temp)
+                    ->float('downfall', $down)
+                    ->compound('effects', function (Nbt $fx): void {
+                        $fx->int('sky_color', 7907327)
+                            ->int('fog_color', 12638463)
+                            ->int('water_color', 4159204)
+                            ->int('water_fog_color', 329011)
+                            ->compound('mood_sound', function (Nbt $ms): void {
+                                $ms->string('sound', 'minecraft:ambient.cave')
+                                    ->int('tick_delay', 6000)
+                                    ->int('block_search_extent', 8)
+                                    ->double('offset', 2.0);
+                            });
                     });
-            };
+            });
         }
-        return $callbacks;
+        return $entries;
+    }
+
+    public static function getChatTypeEntries(): array
+    {
+        return [
+            'minecraft:chat' => Nbt::networkRoot(function (Nbt $n): void {
+                $n->compound('chat', function (Nbt $c): void {
+                    $c->string('translation_key', 'chat.type.text')
+                        ->listString('parameters', ['sender', 'content']);
+                })->compound('narration', function (Nbt $c): void {
+                    $c->string('translation_key', 'chat.type.text.narrate')
+                        ->listString('parameters', ['sender', 'content']);
+                });
+            })
+        ];
+    }
+
+    public static function getDamageTypeEntries(): array
+    {
+        return [
+            'minecraft:generic' => Nbt::networkRoot(function (Nbt $n): void {
+                $n->string('message_id', 'generic')
+                    ->float('exhaustion', 0.0)
+                    ->string('scaling', 'when_caused_by_living_non_player');
+            })
+        ];
     }
 
     private function __construct()
@@ -1283,25 +1319,29 @@ final class PacketFactory
     public function createJoinGame(int $entityId): string
     {
         $data = pack('N', $entityId & 0xFFFFFFFF);
-        $data .= chr(0);
-        $data .= chr(1);
-        $data .= pack('c', -1);
+        $data .= chr(0);                              // isHardcore
+        $data .= chr(1);                              // gameMode
+        $data .= pack('c', -1);                       // previousGameMode
 
-        $data .= VarInt::write(1) . StringHandler::write('minecraft:overworld');
+        $data .= VarInt::write(1) . StringHandler::write('minecraft:overworld'); // worldNames
 
-        // ОБЯЗАТЕЛЬНО РАСКОММЕНТИРОВАТЬ! В 1.20.1 NBT должен быть здесь.
+        // ОБЯЗАТЕЛЬНО! В 1.20.1 dimensionCodec находится ВНУТРИ Join Game
         $data .= RegistryData::dimensionCodec();
 
+        // ОБЯЗАТЕЛЬНО! worldType тоже должен быть
         $data .= StringHandler::write('minecraft:overworld'); // worldType
         $data .= StringHandler::write('minecraft:overworld'); // worldName
-        $data .= pack('J', 0);
+
+        $data .= pack('J', 0);                        // hashedSeed
         $data .= VarInt::write($this->config->maxPlayers);
         $data .= VarInt::write($this->config->viewDistance);
         $data .= VarInt::write($this->config->simulationDistance);
+
         $data .= chr(0);                              // reducedDebugInfo
         $data .= chr(1);                              // enableRespawnScreen
         $data .= chr(0);                              // isDebug
         $data .= chr(0);                              // isFlat
+
         $data .= chr(0);                              // death location: absent
         $data .= VarInt::write(0);                    // portalCooldown
 
@@ -1484,9 +1524,10 @@ final class PacketFactory
     /** Spawn Position (play S2C 0x50): position(long) + angle f32. */
     public function createSpawnPosition(int $x, int $y, int $z): string
     {
-        return StringHandler::write('minecraft:overworld')
-            . pack('J', self::encodeBlockPosition($x, $y, $z))
-            . pack('G', 0.0); // Angle (один float)
+        // Для 1.20.1: только position (Long) и angle (Float).
+        // Поле dimension (String) в этом пакете отсутствует.
+        return pack('J', self::encodeBlockPosition($x, $y, $z))
+            . pack('G', 0.0);
     }
 
     /** Named Entity Spawn (0x03) не нужен; вместо него клиент сам рендерит себя. */
@@ -1496,11 +1537,11 @@ final class PacketFactory
     {
         $teleportId = ++$this->teleportIdCounter;
 
-        return pack('E', $x) . pack('E', $y) . pack('E', $z)
-            . pack('G', 0.0) . pack('G', 0.0)
-            . chr(0) // flags
-            . VarInt::write($teleportId)
-            . chr(0); // Dismount Vehicle (Boolean)
+        return VarInt::write($teleportId)                 // 1. Teleport ID
+            . pack('E', $x) . pack('E', $y) . pack('E', $z) // 2. Координаты (Double)
+            . pack('E', 0.0) . pack('E', 0.0) . pack('E', 0.0) // 3. Velocity (Double) — обязательно!
+            . pack('G', 0.0) . pack('G', 0.0)             // 4. Yaw, Pitch (Float)
+            . chr(0);                                      // 5. Flags (Byte)
     }
 
     /** Текущий ожидаемый teleport id (для подтверждения клиентом). */
@@ -1563,6 +1604,18 @@ final class PacketFactory
     public function createPluginMessageBrand(): string
     {
         return StringHandler::write('minecraft:brand') . StringHandler::write('vanilla');
+    }
+
+    public function createRegistryData(string $registryId, array $entries): string
+    {
+        $data = StringHandler::write($registryId);
+        $data .= VarInt::write(count($entries));
+        foreach ($entries as $entryId => $nbtData) {
+            $data .= StringHandler::write((string)$entryId);
+            $data .= chr(1); // hasData = true
+            $data .= $nbtData; // Network NBT
+        }
+        return $data;
     }
 
     /** Кодирование Block Position (протокол): ((x&0x3FFFFFF)<<38)|((z&0x3FFFFFF)<<12)|(y&0xFFF). */
@@ -2664,11 +2717,11 @@ final class MinecraftServer
                 PacketId::PLAY_JOIN_GAME,
                 $this->packetFactory->createJoinGame($entityId)
             );
-            PacketLogger::logInfo("Join Game (0x29) отправлен клиенту $clientId");
 
+            // 3. Custom Payload (Brand) и остальные пакеты спавна...
             $this->connectionManager->sendPacket(
                 $clientId,
-                PacketId::PLAY_CUSTOM_PAYLOAD,
+                PacketId::CB_PLAY_CUSTOM_PAYLOAD,
                 $this->packetFactory->createPluginMessageBrand()
             );
 
