@@ -1018,7 +1018,7 @@ final class RegistryData
                     $e->byte('ultrawarm', 0)
                         ->byte('natural', 1)
                         ->double('coordinate_scale', 1.0)
-                        ->float('ambient_light', 0.0) // в вики это Float, не Double
+                        ->float('ambient_light', 0.0)
                         ->byte('has_ceiling', 0)
                         ->byte('has_skylight', 1)
                         ->byte('piglin_safe', 0)
@@ -1030,13 +1030,7 @@ final class RegistryData
                         ->int('logical_height', 384)
                         ->string('infiniburn', '#minecraft:infiniburn_overworld')
                         ->string('effects', 'minecraft:overworld')
-                        ->compound('monster_spawn_light_level', function (Nbt $ms): void {
-                            $ms->string('type', 'minecraft:uniform')
-                                ->compound('value', function (Nbt $v): void {
-                                    $v->int('min_inclusive', 0)
-                                        ->int('max_inclusive', 7); // для overworld обычно 0-7
-                                });
-                        })
+                        ->int('monster_spawn_light_level', 7)
                         ->int('monster_spawn_block_light_limit', 0);
                 })
                     ->int('id', 0)
@@ -1060,24 +1054,31 @@ final class RegistryData
     public static function biomeEntryCallback(int $id, array $biome): callable
     {
         $name = $biome['name'];
-        $precip = $biome['precipitation'] ? 1 : 0;
+        // ИСПРАВЛЕНО: В 1.19.3+ precipitation это строка ("none", "rain", "snow")
+        $precip = $biome['precipitation'] ? 'rain' : 'none';
         $temp = $biome['temperature'];
         $down = $biome['downfall'];
 
         return static function (Nbt $n) use ($id, $name, $precip, $temp, $down): void {
-            $n->compound('element', function (Nbt $e) use ($precip, $temp, $down): void {
-                $e->byte('has_precipitation', $precip)
+            $n->int('id', $id)
+                ->string('name', 'minecraft:' . $name)
+                ->compound('element', function (Nbt $e) use ($precip, $temp, $down): void {
+                    $e->string('precipitation', $precip) // Строка вместо byte!
                     ->float('temperature', $temp)
-                    ->float('downfall', $down)
-                    ->compound('effects', function (Nbt $fx): void {
-                        $fx->int('sky_color', 0x7A7FF)
-                            ->int('fog_color', 0xC0D7F)
-                            ->int('water_color', 0x3F76E4)
-                            ->int('water_fog_color', 0x50533);
-                    });
-            })
-                ->int('id', $id)
-                ->string('name', 'minecraft:' . $name);
+                        ->float('downfall', $down)
+                        ->compound('effects', function (Nbt $fx): void {
+                            $fx->int('sky_color', 7907327)
+                                ->int('fog_color', 12638463)
+                                ->int('water_color', 4159204)
+                                ->int('water_fog_color', 329011)
+                                ->compound('mood_sound', function (Nbt $ms): void {
+                                    $ms->string('sound', 'minecraft:ambient.cave')
+                                        ->int('tick_delay', 6000)
+                                        ->int('block_search_extent', 8)
+                                        ->double('offset', 2.0);
+                                });
+                        });
+                });
         };
     }
 
@@ -1091,20 +1092,16 @@ final class RegistryData
                 $e->byte('ultrawarm', 0)
                     ->byte('natural', 1)
                     ->double('coordinate_scale', 1.0)
-                    ->double('ambient_light', 0.0)
+                    ->float('ambient_light', 0.0) // в вики это Float, не Double
                     ->byte('has_ceiling', 0)
                     ->byte('has_skylight', 1)
                     ->byte('piglin_safe', 0)
                     ->byte('bed_works', 1)
                     ->byte('respawn_anchor_works', 0)
                     ->byte('has_raids', 1)
-                    ->int('min_y', -64)
-                    ->int('height', 384)
                     ->int('logical_height', 384)
                     ->string('infiniburn', '#minecraft:infiniburn_overworld')
-                    ->string('effects', 'minecraft:overworld')
-                    ->int('monster_spawn_light_level', 0)
-                    ->int('monster_spawn_block_light_limit', 0);
+                    ->string('effects', 'minecraft:overworld');
             })
                 ->int('id', 0)
                 ->string('name', 'minecraft:overworld');
@@ -1122,49 +1119,78 @@ final class RegistryData
             return self::$dimensionCodec;
         }
 
+        // Для Join Game (1.16 - 1.20.1) структура плоская: списки лежат напрямую в корне
         self::$dimensionCodec = Nbt::networkRoot(function (Nbt $n): void {
-            // 1. Измерения: TAG_Compound с type и value
-            $n->compound('minecraft:dimension_type', function (Nbt $reg): void {
-                $reg->string('type', 'minecraft:dimension_type')
-                    ->listCompound('value', self::dimensionEntries());
-            });
-
-            // 2. Биомы: TAG_Compound с type и value
-            $n->compound('minecraft:worldgen/biome', function (Nbt $reg): void {
-                $reg->string('type', 'minecraft:worldgen/biome')
-                    ->listCompound('value', self::biomeEntries());
-            });
-
-            // 3. Типы чата: TAG_Compound с type и value
-            $n->compound('minecraft:chat_type', function (Nbt $reg): void {
-                $reg->string('type', 'minecraft:chat_type')
-                    ->listCompound('value', self::chatEntries());
-            });
+            $n->listCompound('minecraft:dimension_type', self::dimensionEntries())
+                ->listCompound('minecraft:worldgen/biome', self::biomeEntries());
         });
 
         return self::$dimensionCodec;
     }
 
-    public static function chatEntries(): array
+    /** @return array<int, callable> 7 записей chat_type для 1.20.1 */
+    private static function chatTypeEntries(): array
     {
-        return [
-            static function (Nbt $n): void {
-                $n->int('id', 0)
-                    ->string('name', 'minecraft:chat')
-                    ->compound('element', function (Nbt $e): void {
-                        // chat: плоская структура без 'decoration'
-                        $e->compound('chat', function (Nbt $chat): void {
-                            $chat->string('translation_key', 'chat.type.text')
-                                ->listString('parameters', ['sender', 'content']); // <-- TAG_String
+        $types = [
+            ['id' => 0, 'name' => 'minecraft:chat', 'chat_key' => 'chat.type.text', 'narration_key' => 'chat.type.text.narrate'],
+            ['id' => 1, 'name' => 'minecraft:emote_command', 'chat_key' => 'chat.type.emote', 'narration_key' => 'chat.type.emote'],
+            ['id' => 2, 'name' => 'minecraft:msg_command_incoming', 'chat_key' => 'commands.message.display.incoming', 'narration_key' => 'chat.type.text.narrate'],
+            ['id' => 3, 'name' => 'minecraft:msg_command_outgoing', 'chat_key' => 'commands.message.display.outgoing', 'narration_key' => 'chat.type.text.narrate'],
+            ['id' => 4, 'name' => 'minecraft:say_command', 'chat_key' => 'chat.type.announcement', 'narration_key' => 'chat.type.text.narrate'],
+            ['id' => 5, 'name' => 'minecraft:team_msg_command_incoming', 'chat_key' => 'chat.type.team.text', 'narration_key' => 'chat.type.text.narrate'],
+            ['id' => 6, 'name' => 'minecraft:team_msg_command_outgoing', 'chat_key' => 'chat.type.team.sent', 'narration_key' => 'chat.type.text.narrate'],
+        ];
+
+        $callbacks = [];
+        foreach ($types as $t) {
+            $callbacks[] = static function (Nbt $n) use ($t): void {
+                $n->int('id', $t['id'])
+                    ->string('name', $t['name'])
+                    ->compound('element', function (Nbt $e) use ($t): void {
+                        $e->compound('chat', function (Nbt $c) use ($t): void {
+                            $c->string('translation_key', $t['chat_key'])
+                                ->listString('parameters', ['sender', 'content']);
                         })
-                            // narration: та же структура
-                            ->compound('narration', function (Nbt $nar): void {
-                                $nar->string('translation_key', 'chat.type.text.narrate')
+                            ->compound('narration', function (Nbt $na) use ($t): void {
+                                $na->string('translation_key', $t['narration_key'])
                                     ->listString('parameters', ['sender', 'content']);
                             });
                     });
-            },
+            };
+        }
+        return $callbacks;
+    }
+
+    /** @return array<int, callable> 49 записей damage_type для 1.20.1 */
+    private static function damageTypeEntries(): array
+    {
+        $names = [
+            'arrow', 'bad_respawn_point', 'cactus', 'campfire', 'cramming',
+            'dragon_breath', 'drown', 'dry_out', 'ender_pearl', 'explosion',
+            'fall', 'falling_anvil', 'falling_block', 'falling_stalactite',
+            'fireball', 'fireworks', 'fly_into_wall', 'freeze', 'generic',
+            'hot_floor', 'in_fire', 'in_wall', 'indirect_magic', 'lava',
+            'lightning_bolt', 'magic', 'mob_attack', 'mob_attack_no_aggro',
+            'mob_projectile', 'on_fire', 'out_of_world', 'outside_border',
+            'player_attack', 'player_explosion', 'sonic_boom', 'stalagmite',
+            'starve', 'sting', 'sweet_berry_bush', 'thorns', 'thrown',
+            'trident', 'unattributed_fireball', 'wither', 'wither_skull',
+            'wither_skull_dangerous', 'sulfur_cube_hot', 'sulfur_cube',
+            'wind_charge',
         ];
+
+        $callbacks = [];
+        foreach ($names as $id => $name) {
+            $callbacks[] = static function (Nbt $n) use ($id, $name): void {
+                $n->int('id', $id)
+                    ->string('name', 'minecraft:' . $name)
+                    ->compound('element', function (Nbt $e) use ($name): void {
+                        $e->string('message_id', $name)
+                            ->string('scaling', 'when_caused_by_living_non_player');
+                    });
+            };
+        }
+        return $callbacks;
     }
 
     private function __construct()
@@ -1256,14 +1282,19 @@ final class PacketFactory
      */
     public function createJoinGame(int $entityId): string
     {
-        $data = pack('N', $entityId & 0xFFFFFFFF);   // entityId (i32, big-endian)
-        $data .= chr(0);                              // isHardcore = false
-        $data .= chr(1);                              // gameMode u8: 1 = Creative
-        $data .= pack('c', -1);                       // previousGameMode = none
-        $data .= VarInt::write(1) . StringHandler::write('minecraft:overworld'); // worldNames
-        $data .= RegistryData::dimensionCodec();      // dimensionCodec (NBT)
+        $data = pack('N', $entityId & 0xFFFFFFFF);
+        $data .= chr(0);
+        $data .= chr(1);
+        $data .= pack('c', -1);
+
+        $data .= VarInt::write(1) . StringHandler::write('minecraft:overworld');
+
+        // ОБЯЗАТЕЛЬНО РАСКОММЕНТИРОВАТЬ! В 1.20.1 NBT должен быть здесь.
+        $data .= RegistryData::dimensionCodec();
+
+        $data .= StringHandler::write('minecraft:overworld'); // worldType
         $data .= StringHandler::write('minecraft:overworld'); // worldName
-        $data .= pack('J', 0);                        // hashedSeed
+        $data .= pack('J', 0);
         $data .= VarInt::write($this->config->maxPlayers);
         $data .= VarInt::write($this->config->viewDistance);
         $data .= VarInt::write($this->config->simulationDistance);
@@ -1292,19 +1323,10 @@ final class PacketFactory
         // --- add_player (0x01) ---
         $data .= StringHandler::write($username);
         $data .= VarInt::write(0);             // Свойств (properties) нет
-
-        // --- update_game_mode (0x04) ---
-        $data .= VarInt::write(1);             // Creative
-
-        $data .= chr(0); // chat session: absent (Boolean false)
-        // --- update_game_mode (0x04) ---
-        $data .= VarInt::write(1);             // Creative
-
-        // --- update_listed (0x08) ---
-        $data .= chr(1);                       // true (Bool)
-
-        // --- update_latency (0x10) ---
-        $data .= VarInt::write(0);             // Ping 0
+        $data .= chr(0);                       // chat session: absent (Initialize Chat)
+        $data .= VarInt::write(1);             // Creative (Update Game Mode)
+        $data .= chr(1);                       // true (Update Listed)
+        $data .= VarInt::write(0);             // Ping 0 (Update Latency)
 
         return $data;
     }
@@ -1318,11 +1340,14 @@ final class PacketFactory
     /** Declare Commands (play S2C 0x10): nodes=[], rootIndex=0. */
     public function createDeclareCommands(): string
     {
-        // 1 узел (корневой), флаги = 0, количество детей = 0
-        return VarInt::write(1)   // количество узлов
+        // 2 узла: корневой (индекс 0) и один дочерний (индекс 1)
+        return VarInt::write(2)   // количество узлов
             . VarInt::write(0)    // корневой индекс
-            . chr(0)              // флаги узла (0)
-            . VarInt::write(0);   // количество детей (0)
+            . chr(0)              // флаги корневого узла
+            . VarInt::write(1)    // количество детей у корневого узла
+            . VarInt::write(1)    // индекс ребёнка
+            . chr(0)              // флаги дочернего узла
+            . VarInt::write(0);   // количество детей у дочернего узла
     }
 
     /** Game Event (play S2C 0x1F): reason(u8) + value(f32). 13 = start waiting for chunks. */
