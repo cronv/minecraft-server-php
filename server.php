@@ -7,6 +7,26 @@ declare(strict_types=1);
  *
  * Точка входа: php server.php
  *
+ * ГЛАВНОЕ ИСПРАВЛЕНИЕ (клиент падал с DecoderException
+ * "Packet 41 (wj) was larger than I expected, found 19190 bytes extra"):
+ * вся таблица Clientbound Play ID была составлена по 1.20.2+! В 1.20.1
+ * (проверено по bytecode client.jar 1.20.1, порядок регистрации пакетов):
+ *   Login (Join Game) = 0x28 (НЕ 0x29 — это Map Data, поэтому клиент читал
+ *   19КБ Join Game как данные карты: 119 байт "карты" + 19190 лишних!),
+ *   Chunk Data = 0x24, Keep Alive = 0x23, Difficulty = 0x0C,
+ *   Player Info Update = 0x3A, Position Sync = 0x3C (teleportId ПОСЛЕДНИЙ,
+ *   поля velocity нет), Abilities = 0x34, System Chat = 0x64 и т.д.
+ * Serverbound: Client Information = 0x08, Keep Alive = 0x12, движение = 0x14..0x17.
+ *
+ * Другие исправления: Join Game дописаны 4 обязательных поля (isDebug, isFlat,
+ * lastDeathLocation, portalCooldown — читаются клиентом последними); в чанках
+ * добавлены БИОМЫ каждой секции (bits=0, single-value, plains=35), heightmaps
+ * стали настоящим LongArrayTag (WORLD_SURFACE + MOTION_BLOCKING, 36 long), air
+ * ID = 0 (был 1 = stone), sky light = 0xFF (мир больше не чёрный); Declare
+ * Commands минимальное валидное дерево (rootIndex последним полем); убраны
+ * GameEvent 13 (нет в 1.20.1!) и Hurt Animation при входе; добавлены
+ * Set Chunk Cache Center/Radius (0x4E/0x4F) перед чанками.
+ *
  * Ключевое исправление (клиент 1.20.1 отваливался сразу после Login Success):
  *  - Сервер ожидал пакет Login Acknowledged (login C→S 0x03) и закрывал
  *    соединение через 5 секунд, если он не приходил. Login Acknowledged
@@ -130,7 +150,7 @@ final class PacketId
     public const CB_PLAY_ADD_EXPERIENCE_ORB = 0x02;
     public const CB_PLAY_ADD_PLAYER = 0x03;
     public const CB_PLAY_ANIMATE = 0x04;
-    public const CB_PLAY_AWARD_STATISTICS = 0x05;
+    public const CB_PLAY_AWARD_STATISTICS = 0x04;
     public const CB_PLAY_REGISTRY_DATA = 0x05;
     public const CB_PLAY_BLOCK_CHANGED_ACK = 0x06;
     public const CB_PLAY_BLOCK_DESTRUCTION = 0x07;
@@ -138,55 +158,55 @@ final class PacketId
     public const CB_PLAY_BLOCK_EVENT = 0x09;
     public const CB_PLAY_BLOCK_UPDATE = 0x0A;
     public const CB_PLAY_BOSS_EVENT = 0x0B;
-    public const CB_PLAY_CHANGE_DIFFICULTY = 0x0A;
+    public const CB_PLAY_CHANGE_DIFFICULTY = 0x0C;
     public const CB_PLAY_CHUNK_BATCH_FINISHED = 0x0D;
     public const CB_PLAY_CHUNK_BATCH_START = 0x0E;
-    public const CB_PLAY_CHUNK_BIOMES = 0x0F;
-    public const CB_PLAY_CLEAR_TITLES = 0x10;
-    public const CB_PLAY_COMMAND_SUGGESTIONS = 0x11;
-    public const CB_PLAY_COMMANDS = 0x12;
-    public const CB_PLAY_CONTAINER_CLOSE = 0x13;
-    public const CB_PLAY_CONTAINER_SET_CONTENT = 0x14;
-    public const CB_PLAY_CONTAINER_SET_DATA = 0x15;
-    public const CB_PLAY_CONTAINER_SET_SLOT = 0x16;
-    public const CB_PLAY_COOLDOWN = 0x17;
-    public const CB_PLAY_CUSTOM_CHAT_COMPLETIONS = 0x18;
-    public const CB_PLAY_CUSTOM_PAYLOAD = 0x18;
-    public const CB_PLAY_DAMAGE_EVENT = 0x1A;
-    public const CB_PLAY_DELETE_CHAT = 0x1B;
-    public const CB_PLAY_DISCONNECT = 0x1C;
-    public const CB_PLAY_DISGUISED_CHAT = 0x1D;
-    public const CB_PLAY_ENTITY_EVENT = 0x1E;
-    public const CB_PLAY_EXPLOSION = 0x1F;
-    public const CB_PLAY_FORGET_LEVEL_CHUNK = 0x20;
-    public const CB_PLAY_GAME_EVENT = 0x21;
-    public const CB_PLAY_KEEP_ALIVE = 0x26;
-    public const CB_PLAY_LEVEL_CHUNK_WITH_LIGHT = 0x23;
-    public const CB_PLAY_LEVEL_EVENT = 0x24;
-    public const CB_PLAY_LEVEL_PARTICLES = 0x25;
-    public const CB_PLAY_LIGHT_UPDATE = 0x26;
+    public const CB_PLAY_CHUNK_BIOMES = 0x0D;
+    public const CB_PLAY_CLEAR_TITLES = 0x0E;
+    public const CB_PLAY_COMMAND_SUGGESTIONS = 0x0F;
+    public const CB_PLAY_COMMANDS = 0x10;
+    public const CB_PLAY_CONTAINER_CLOSE = 0x11;
+    public const CB_PLAY_CONTAINER_SET_CONTENT = 0x12;
+    public const CB_PLAY_CONTAINER_SET_DATA = 0x13;
+    public const CB_PLAY_CONTAINER_SET_SLOT = 0x14;
+    public const CB_PLAY_COOLDOWN = 0x15;
+    public const CB_PLAY_CUSTOM_CHAT_COMPLETIONS = 0x16;
+    public const CB_PLAY_CUSTOM_PAYLOAD = 0x17;
+    public const CB_PLAY_DAMAGE_EVENT = 0x18;
+    public const CB_PLAY_DELETE_CHAT = 0x19;
+    public const CB_PLAY_DISCONNECT = 0x1A;
+    public const CB_PLAY_DISGUISED_CHAT = 0x1B;
+    public const CB_PLAY_ENTITY_EVENT = 0x1C;
+    public const CB_PLAY_EXPLOSION = 0x1D;
+    public const CB_PLAY_FORGET_LEVEL_CHUNK = 0x1E;
+    public const CB_PLAY_GAME_EVENT = 0x1F;
+    public const CB_PLAY_KEEP_ALIVE = 0x23;
+    public const CB_PLAY_LEVEL_CHUNK_WITH_LIGHT = 0x24;
+    public const CB_PLAY_LEVEL_EVENT = 0x25;
+    public const CB_PLAY_LEVEL_PARTICLES = 0x26;
+    public const CB_PLAY_LIGHT_UPDATE = 0x27;
     /** Protocol 763: Set Container Content (обновление инвентаря), НЕ Join Game! */
-    public const CB_PLAY_SET_CONTAINER_CONTENT = 0x27;
-    public const CB_PLAY_MAP_ITEM_DATA = 0x28;
+    public const CB_PLAY_SET_CONTAINER_CONTENT = 0x12;
+    public const CB_PLAY_MAP_ITEM_DATA = 0x29;
     /** Protocol 763: Login (Join Game) — ИМЕННО 0x29 (было ошибочно 0x27). */
-    public const CB_PLAY_LOGIN = 0x29; // БЫЛО 0x27, СТАЛО 0x29 (Join Game)
-    public const CB_PLAY_MOVE_ENTITY_POS = 0x2A;
-    public const CB_PLAY_MOVE_ENTITY_POS_ROT = 0x2B;
-    public const CB_PLAY_MOVE_VEHICLE = 0x2C;
-    public const CB_PLAY_OPEN_BOOK = 0x2D;
-    public const CB_PLAY_OPEN_SCREEN = 0x2E;
-    public const CB_PLAY_OPEN_SIGN_EDITOR = 0x2F;
-    public const CB_PLAY_PING = 0x30;
-    public const CB_PLAY_PLACE_GHOST_RECIPE = 0x31;
-    public const CB_PLAY_PLAYER_ABILITIES = 0x32;
-    public const CB_PLAY_PLAYER_CHAT = 0x33;
-    public const CB_PLAY_PLAYER_COMBAT_END = 0x34;
-    public const CB_PLAY_PLAYER_COMBAT_ENTER = 0x35;
-    public const CB_PLAY_PLAYER_COMBAT_KILL = 0x36;
-    public const CB_PLAY_PLAYER_INFO_REMOVE = 0x37;
-    public const CB_PLAY_PLAYER_INFO_UPDATE = 0x38;
-    public const CB_PLAY_PLAYER_LOOK_AT = 0x39;
-    public const CB_PLAY_PLAYER_POSITION = 0x3A;
+    public const CB_PLAY_LOGIN = 0x28; // 1.20.1: Login (Join Game) = 0x28 (0x29 = Map Data! доказано по bytecode клиента)
+    public const CB_PLAY_MOVE_ENTITY_POS = 0x2B;
+    public const CB_PLAY_MOVE_ENTITY_POS_ROT = 0x2C;
+    public const CB_PLAY_MOVE_VEHICLE = 0x2E;
+    public const CB_PLAY_OPEN_BOOK = 0x2F;
+    public const CB_PLAY_OPEN_SCREEN = 0x30;
+    public const CB_PLAY_OPEN_SIGN_EDITOR = 0x31;
+    public const CB_PLAY_PING = 0x32;
+    public const CB_PLAY_PLACE_GHOST_RECIPE = 0x33;
+    public const CB_PLAY_PLAYER_ABILITIES = 0x34;
+    public const CB_PLAY_PLAYER_CHAT = 0x35;
+    public const CB_PLAY_PLAYER_COMBAT_END = 0x36;
+    public const CB_PLAY_PLAYER_COMBAT_ENTER = 0x37;
+    public const CB_PLAY_PLAYER_COMBAT_KILL = 0x38;
+    public const CB_PLAY_PLAYER_INFO_REMOVE = 0x39;
+    public const CB_PLAY_PLAYER_INFO_UPDATE = 0x3A;
+    public const CB_PLAY_PLAYER_LOOK_AT = 0x3B;
+    public const CB_PLAY_PLAYER_POSITION = 0x3C;
     public const CB_PLAY_RECIPE_BOOK_ADD = 0x3B;
     public const CB_PLAY_RECIPE_BOOK_REMOVE = 0x3C;
     public const CB_PLAY_RECIPE_BOOK_SETTINGS = 0x3D;
@@ -229,18 +249,18 @@ final class PacketId
     public const CB_PLAY_SOUND = 0x62;
     public const CB_PLAY_STOP_SOUND = 0x63;
     public const CB_PLAY_STORE_COOKIE = 0x64;
-    public const CB_PLAY_SYSTEM_CHAT = 0x65;
-    public const CB_PLAY_TAB_LIST = 0x66;
-    public const CB_PLAY_TAG_QUERY = 0x67;
+    public const CB_PLAY_SYSTEM_CHAT = 0x64;
+    public const CB_PLAY_TAB_LIST = 0x65;
+    public const CB_PLAY_TAG_QUERY = 0x66;
     public const CB_PLAY_TELEPORT_ENTITY = 0x68;
     public const CB_PLAY_TRANSFER = 0x69;
-    public const CB_PLAY_UPDATE_ADVANCEMENTS = 0x6A;
-    public const CB_PLAY_UPDATE_ATTRIBUTES = 0x6B;
+    public const CB_PLAY_UPDATE_ADVANCEMENTS = 0x69;
+    public const CB_PLAY_UPDATE_ATTRIBUTES = 0x6A;
     public const CB_PLAY_UPDATE_ENABLED_FEATURES = 0x6C;
     public const CB_PLAY_UPDATE_ENTITY_POSITION = 0x6D;
-    public const CB_PLAY_UPDATE_MOB_EFFECT = 0x6E;
-    public const CB_PLAY_UPDATE_RECIPES = 0x6F;
-    public const CB_PLAY_UPDATE_TAGS = 0x70;
+    public const CB_PLAY_UPDATE_MOB_EFFECT = 0x6C;
+    public const CB_PLAY_UPDATE_RECIPES = 0x6D;
+    public const CB_PLAY_UPDATE_TAGS = 0x6E;
 
     // =========================================================================
     // Play State — Serverbound (Client → Server), Protocol 763
@@ -251,54 +271,54 @@ final class PacketId
     public const SB_PLAY_CHAT_ACK = 0x03;
     public const SB_PLAY_CHAT_COMMAND = 0x04;
     public const SB_PLAY_CHAT_COMMAND_SIGNED = 0x05;
-    public const SB_PLAY_CHAT = 0x06;
-    public const SB_PLAY_CHAT_SESSION_UPDATE = 0x07;
+    public const SB_PLAY_CHAT = 0x05;
+    public const SB_PLAY_CHAT_SESSION_UPDATE = 0x06;
     public const SB_PLAY_CHUNK_BATCH_RECEIVED = 0x08;
-    public const SB_PLAY_CLIENT_COMMAND = 0x09;
-    public const SB_PLAY_CLIENT_INFORMATION = 0x0A;
-    public const SB_PLAY_COMMAND_SUGGESTIONS = 0x0B;
+    public const SB_PLAY_CLIENT_COMMAND = 0x07;
+    public const SB_PLAY_CLIENT_INFORMATION = 0x08;
+    public const SB_PLAY_COMMAND_SUGGESTIONS = 0x09;
     public const SB_PLAY_CONTAINER_CLOSE = 0x0C;
-    public const SB_PLAY_CONTAINER_CLICK = 0x0D;
-    public const SB_PLAY_CONTAINER_BUTTON_CLICK = 0x0E;
-    public const SB_PLAY_SET_CREATIVE_MODE_SLOT = 0x0F;
-    public const SB_PLAY_CUSTOM_PAYLOAD = 0x10;
-    public const SB_PLAY_EDIT_BOOK = 0x11;
-    public const SB_PLAY_ENTITY_TAG_QUERY = 0x12;
-    public const SB_PLAY_INTERACT = 0x13;
-    public const SB_PLAY_JIGSAW_GENERATE = 0x14;
-    public const SB_PLAY_KEEP_ALIVE = 0x15;
-    public const SB_PLAY_LOCK_DIFFICULTY = 0x16;
-    public const SB_PLAY_MOVE_PLAYER_POS = 0x17;
-    public const SB_PLAY_MOVE_PLAYER_POS_ROT = 0x18;
-    public const SB_PLAY_MOVE_PLAYER_ROT = 0x19;
-    public const SB_PLAY_MOVE_PLAYER_STATUS_ONLY = 0x1A;
-    public const SB_PLAY_MOVE_VEHICLE = 0x1B;
-    public const SB_PLAY_PADDLE_BOAT = 0x1C;
-    public const SB_PLAY_PICK_ITEM = 0x1D;
-    public const SB_PLAY_PLACE_RECIPE = 0x1E;
-    public const SB_PLAY_PLAYER_ABILITIES = 0x1F;
-    public const SB_PLAY_PLAYER_ACTION = 0x20;
-    public const SB_PLAY_PLAYER_COMMAND = 0x21;
-    public const SB_PLAY_PLAYER_INPUT = 0x22;
-    public const SB_PLAY_PONG = 0x23;
-    public const SB_PLAY_RECIPE_BOOK_CHANGE_SETTINGS = 0x24;
-    public const SB_PLAY_RECIPE_BOOK_SEEN_RECIPE = 0x25;
-    public const SB_PLAY_RENAME_ITEM = 0x26;
-    public const SB_PLAY_RESOURCE_PACK = 0x27;
-    public const SB_PLAY_SEEN_ADVANCEMENTS = 0x28;
-    public const SB_PLAY_SELECT_TRADE = 0x29;
-    public const SB_PLAY_SET_BEACON = 0x2A;
-    public const SB_PLAY_SET_CARRIED_ITEM = 0x2B;
-    public const SB_PLAY_SET_COMMAND_BLOCK = 0x2C;
-    public const SB_PLAY_SET_COMMAND_MINECART = 0x2D;
+    public const SB_PLAY_CONTAINER_CLICK = 0x0B;
+    public const SB_PLAY_CONTAINER_BUTTON_CLICK = 0x0A;
+    public const SB_PLAY_SET_CREATIVE_MODE_SLOT = 0x2B;
+    public const SB_PLAY_CUSTOM_PAYLOAD = 0x0D;
+    public const SB_PLAY_EDIT_BOOK = 0x0E;
+    public const SB_PLAY_ENTITY_TAG_QUERY = 0x0F;
+    public const SB_PLAY_INTERACT = 0x10;
+    public const SB_PLAY_JIGSAW_GENERATE = 0x11;
+    public const SB_PLAY_KEEP_ALIVE = 0x12;
+    public const SB_PLAY_LOCK_DIFFICULTY = 0x13;
+    public const SB_PLAY_MOVE_PLAYER_POS = 0x14;
+    public const SB_PLAY_MOVE_PLAYER_POS_ROT = 0x15;
+    public const SB_PLAY_MOVE_PLAYER_ROT = 0x16;
+    public const SB_PLAY_MOVE_PLAYER_STATUS_ONLY = 0x17;
+    public const SB_PLAY_MOVE_VEHICLE = 0x18;
+    public const SB_PLAY_PADDLE_BOAT = 0x19;
+    public const SB_PLAY_PICK_ITEM = 0x1A;
+    public const SB_PLAY_PLACE_RECIPE = 0x1B;
+    public const SB_PLAY_PLAYER_ABILITIES = 0x1C;
+    public const SB_PLAY_PLAYER_ACTION = 0x1D;
+    public const SB_PLAY_PLAYER_COMMAND = 0x1E;
+    public const SB_PLAY_PLAYER_INPUT = 0x1F;
+    public const SB_PLAY_PONG = 0x20;
+    public const SB_PLAY_RECIPE_BOOK_CHANGE_SETTINGS = 0x21;
+    public const SB_PLAY_RECIPE_BOOK_SEEN_RECIPE = 0x22;
+    public const SB_PLAY_RENAME_ITEM = 0x23;
+    public const SB_PLAY_RESOURCE_PACK = 0x24;
+    public const SB_PLAY_SEEN_ADVANCEMENTS = 0x25;
+    public const SB_PLAY_SELECT_TRADE = 0x26;
+    public const SB_PLAY_SET_BEACON = 0x27;
+    public const SB_PLAY_SET_CARRIED_ITEM = 0x28;
+    public const SB_PLAY_SET_COMMAND_BLOCK = 0x29;
+    public const SB_PLAY_SET_COMMAND_MINECART = 0x2A;
     public const SB_PLAY_SET_HELD_ITEM = 0x2E;
-    public const SB_PLAY_SET_JIGSAW_BLOCK = 0x2F;
-    public const SB_PLAY_SET_STRUCTURE_BLOCK = 0x30;
-    public const SB_PLAY_SIGN_UPDATE = 0x31;
-    public const SB_PLAY_SWING = 0x32;
-    public const SB_PLAY_TELEPORT_TO_ENTITY = 0x33;
-    public const SB_PLAY_USE_ITEM_ON = 0x34;
-    public const SB_PLAY_USE_ITEM = 0x35;
+    public const SB_PLAY_SET_JIGSAW_BLOCK = 0x2C;
+    public const SB_PLAY_SET_STRUCTURE_BLOCK = 0x2D;
+    public const SB_PLAY_SIGN_UPDATE = 0x2E;
+    public const SB_PLAY_SWING = 0x2F;
+    public const SB_PLAY_TELEPORT_TO_ENTITY = 0x30;
+    public const SB_PLAY_USE_ITEM_ON = 0x31;
+    public const SB_PLAY_USE_ITEM = 0x32;
 
     // =========================================================================
     // Обратная совместимость: старые имена (CS_* / PLAY_* / CONFIG_* / LOGIN_*)
@@ -532,27 +552,27 @@ final class PacketLogger
             0x23 => 'SB Play: Pong',
 
             // Clientbound Play (S→C)
-            0x0D => 'CB Play: Chunk Batch Finished (Empty Snapshot)',
-            0x12 => 'CB Play: Commands (Declare Commands)',
-            0x19 => 'CB Play: Custom Payload (Plugin Message)',
-            0x1A => 'CB Play: Damage Event (Hurt Animation)',
-            0x21 => 'CB Play: Game Event',
-            0x22 => 'CB Play: Keep Alive',
-            0x23 => 'CB Play: Level Chunk With Light (Chunk Data)',
+            0x0D => 'CB Play: Chunk Biomes',
+            0x10 => 'CB Play: Commands (Declare Commands)',
+            0x17 => 'CB Play: Custom Payload (Plugin Message)',
+            0x21 => 'CB Play: Hurt Animation',
+            0x1F => 'CB Play: Game Event',
+            0x23 => 'CB Play: Keep Alive',
+            0x24 => 'CB Play: Level Chunk With Light (Chunk Data)',
             0x27 => 'CB Play: Set Container Content',
-            0x29 => 'CB Play: Login (Join Game)',
+            0x28 => 'CB Play: Login (Join Game)',
             0x2A => 'CB Play: Move Entity Pos',
-            0x32 => 'CB Play: Player Abilities',
+            0x34 => 'CB Play: Player Abilities',
             0x37 => 'CB Play: Player Info Remove',
-            0x38 => 'CB Play: Player Info Update (Add)',
-            0x3A => 'CB Play: Player Position (Teleport)',
+            0x3A => 'CB Play: Player Info Update (Add)',
+            0x3C => 'CB Play: Player Position (Teleport)',
             0x4D => 'CB Play: Set Carried Item (Held Item Change)',
             0x50 => 'CB Play: Set Default Spawn Position',
             0x56 => 'CB Play: Set Experience',
             0x57 => 'CB Play: Set Health',
             0x5C => 'CB Play: Set Simulation Distance',
             0x5E => 'CB Play: Set Time (Time Update)',
-            0x65 => 'CB Play: System Chat',
+            0x64 => 'CB Play: System Chat',
             0x0C => 'CB Play: Change Difficulty (Server Difficulty)',
         ];
 
@@ -741,6 +761,7 @@ final class Nbt
     public const T_STRING = 8;
     public const T_LIST = 9;
     public const T_COMPOUND = 10;
+    public const T_LONG_ARRAY = 12;
 
     /** @var string Аккумулирующий байтовый буфер. */
     public string $buf = '';
@@ -881,6 +902,21 @@ final class Nbt
         $this->tagHeader(self::T_STRING, $name);
         $this->buf .= pack('n', strlen($value)) . $value;
 
+        return $this;
+    }
+
+    /**
+     * Настоящий TAG_Long_Array (тип 12, 8 байт на значение). ВАЖНО: heightmaps
+     * в пакете Chunk Data клиент 1.20.1 читает ТОЛЬКО как LongArrayTag —
+     * список/short-массив приводит к RuntimeException и разрыву соединения.
+     */
+    public function longArray(string $name, array $values): self
+    {
+        $this->tagHeader(self::T_LONG_ARRAY, $name);
+        $this->buf .= pack('N', count($values));
+        foreach ($values as $v) {
+            $this->buf .= pack('J', $v);
+        }
         return $this;
     }
 
@@ -1377,17 +1413,17 @@ final class PacketFactory
         return VarInt::write(1) . Uuid::toBinary($uuid);
     }
 
-    /** Declare Commands (play S2C 0x10): nodes=[], rootIndex=0. */
+    /**
+     * Declare Commands (play S2C 0x10, protocol 763).
+     * Формат: VarInt nodeCount -> N узлов (flags, [children...], [extra]) -> VarInt rootIndex (ПОСЛЕДНИЙ!).
+     * Минимальное валидное дерево: один корневой узел без детей, rootIndex=0.
+     */
     public function createDeclareCommands(): string
     {
-        // 2 узла: корневой (индекс 0) и один дочерний (индекс 1)
-        return VarInt::write(2)   // количество узлов
-            . VarInt::write(0)    // корневой индекс
-            . chr(0)              // флаги корневого узла
-            . VarInt::write(1)    // количество детей у корневого узла
-            . VarInt::write(1)    // индекс ребёнка
-            . chr(0)              // флаги дочернего узла
-            . VarInt::write(0);   // количество детей у дочернего узла
+        return VarInt::write(1)  // nodeCount
+            . chr(0)             // узел 0 (root): флаги = обычный узел без типа
+            . VarInt::write(0)   // детей у узла нет
+            . VarInt::write(0);  // rootIndex = 0 (последнее поле!)
     }
 
     /** Game Event (play S2C 0x1F): reason(u8) + value(f32). 13 = start waiting for chunks. */
@@ -1432,7 +1468,16 @@ final class PacketFactory
         return chr(0) . VarInt::write(0) . StringHandler::write('');
     }
 
-    /** Chunk Data (play S2C 0x24 map_chunk, protocol 763) — плоский бедрок-мир. */
+    /**
+     * Chunk Data (play S2C 0x24 Level Chunk With Light, protocol 763) — плоский бедрок-мир.
+     *
+     * Формат секции 1.18+ (проверен по bytecode клиента 1.20.1 PalettedContainer.read):
+     *   [short nonAirCount][byte bitsPerEntry][палитра][VarInt longCount + longs][БИОМЫ: та же структура]
+     *   - bits=0: single-value палитра (1 VarInt) + ВСЕГДА VarInt longCount (=0);
+     *   - биомы ОБЯЗАТЕЛЬНЫ в каждой секции (иначе десинхронизация парсера).
+     * Heightmaps: Compound из LongArrayTag (WORLD_SURFACE + MOTION_BLOCKING, 36 long:
+     * 256 колонок × 9 бит). Другой тип тега -> RuntimeException клиента.
+     */
     public function createChunkData(int $chunkX, int $chunkZ): string
     {
         $cacheKey = $chunkX . ':' . $chunkZ;
@@ -1447,31 +1492,22 @@ final class PacketFactory
 
         $data = pack('NN', $chunkX, $chunkZ);
 
-        // Heightmaps NBT: motion_blocking + ocean_floor (short arrays по 17 нулей)
-        // ИСПОЛЬЗУЕМ networkRoot вместо root
+        // Heightmaps: LongArrayTag "WORLD_SURFACE" и "MOTION_BLOCKING" (36 нулевых long)
         $hm = Nbt::networkRoot(function (Nbt $n): void {
-            $zeros = array_fill(0, 17, 0);
-            $n->primitiveArray('motion_blocking', Nbt::T_SHORT, $zeros)
-                ->primitiveArray('ocean_floor', Nbt::T_SHORT, $zeros);
+            $heights = array_fill(0, 36, 0);
+            $n->longArray('WORLD_SURFACE', $heights)
+                ->longArray('MOTION_BLOCKING', $heights);
         });
         $data .= $hm;
 
-        // chunkData (varint length-prefixed buffer): 24 секции (y=-64..320)
+        // chunkData: 24 секции (y=-64..320); после блоков каждой секции — БИОМЫ
+        $BIOME_PLAINS = 35; // индекс minecraft:plains в реестре биомов dimensionCodec
         $sections = '';
-        // Секции 0..3: y=-64..0 — заполнены (бедрок y=-64, камень выше)
-        // Секция 4: y=0..16 — воздух над бедроком? Спавн на y=-60 → секция 0.
         for ($s = 0; $s < 24; $s++) {
-            $blockCount = pack('n', 0);
             if ($s === 0) {
-                // Бедрок на нижнем уровне секции 0: non-air block count
-                $blockCount = pack('n', 256);
-                // Палитра: air(0), bedrock(31) → bits per entry = 4 (min 4)
-                $palette = VarInt::write(2) . VarInt::write(0) . VarInt::write(31);
-                // 4 бита * 4096 блоков / 64 = 256 long
-                $longs = 256;
-                // Заполняем: все блоки уровня y=0 внутри секции (первые 256 индексов) = bedrock (palette index 1)
-                $packed = str_repeat("\x00", $longs * 8);
-                // Индексы 0..255 (нижний слой 16x16) получают значение 1 (bedrock)
+                // Секция 0: бедрок на нижнем слое (non-air block count = 256)
+                $palette = VarInt::write(2) . VarInt::write(0) . VarInt::write(31); // air(0), bedrock(31)
+                $longs = 256; // 4 бита * 4096 блоков / 64
                 $words = array_fill(0, $longs, 0);
                 for ($i = 0; $i < 256; $i++) {
                     $wordIdx = intdiv($i * 4, 64);
@@ -1482,11 +1518,14 @@ final class PacketFactory
                 foreach ($words as $w) {
                     $packed .= pack('J', $w);
                 }
-                $sections .= $blockCount . chr(4) . $palette . VarInt::write($longs) . $packed;
+                $sections .= pack('n', 256) . chr(4) . $palette
+                    . VarInt::write($longs) . $packed;
             } else {
-                // Полностью воздушная секция: single-value palette air, 0 longs
-                $sections .= $blockCount . chr(0) . VarInt::write(1) . VarInt::write(0) . VarInt::write(0);
+                // Воздушная секция: bits=0, single-value air (ID 0!), VarInt longCount=0
+                $sections .= pack('n', 0) . chr(0) . VarInt::write(0) . VarInt::write(0);
             }
+            // БИОМЫ секции (обязательны): bits=0, single-value plains, longCount=0
+            $sections .= chr(0) . VarInt::write($BIOME_PLAINS) . VarInt::write(0);
         }
 
         $data .= VarInt::write(strlen($sections)) . $sections;
@@ -1494,23 +1533,20 @@ final class PacketFactory
         // Block entities count
         $data .= VarInt::write(0);
 
-        // Light masks: skyLightMask=[1...] но проще: все секции пусты по свету →
-        // sky mask = 0b1111... (24 секции) — корректнее дать empty-маски.
-        $maskAll = pack('J', 0xFFFFFF); // 24 бита = 24 секции
-        $data .= VarInt::write(1) . $maskAll;          // skyLightMask
-        $data .= VarInt::write(1) . $maskAll;          // blockLightMask
-        $data .= VarInt::write(1) . $maskAll;          // emptySkyLightMask
-        $data .= VarInt::write(1) . $maskAll;          // emptyBlockLightMask
-        // skyLight array: 24 записи по 2048 байт (все нули = темнота до обновления skylight)
+        // --- Свет (1.20.1): 4 bitset-маски (VarInt longCount + longs) + массивы ---
+        // sky: во всех 24 секциях массивы 2048 байт 0xFF (уровень света 15 = яркое небо).
+        // blockLight: пустая маска + 0 массивов; emptyBlockLight: все 24 секции.
+        $maskAll = VarInt::write(1) . pack('J', 0xFFFFFF);
+        $maskNone = VarInt::write(0);
+        $data .= $maskAll;    // skyLightMask (24 секции с массивами)
+        $data .= $maskNone;   // blockLightMask (0 массивов)
+        $data .= $maskNone;   // emptySkyLightMask
+        $data .= $maskAll;    // emptyBlockLightMask (блок-свет = 0 без массивов)
         $data .= VarInt::write(24);
         for ($i = 0; $i < 24; $i++) {
-            $data .= VarInt::write(2048) . str_repeat("\x00", 2048);
+            $data .= VarInt::write(2048) . str_repeat("\xFF", 2048);
         }
-        // blockLight array: 24 записи
-        $data .= VarInt::write(24);
-        for ($i = 0; $i < 24; $i++) {
-            $data .= VarInt::write(2048) . str_repeat("\x00", 2048);
-        }
+        $data .= VarInt::write(0); // blockLight arrays: 0
 
         return $this->chunkCache[$cacheKey] = $data;
     }
@@ -1532,16 +1568,20 @@ final class PacketFactory
 
     /** Named Entity Spawn (0x03) не нужен; вместо него клиент сам рендерит себя. */
 
-    /** Position and Teleport (play S2C 0x3C): x,y,z f64 + yaw,pitch f32 + flags i8 + teleportId varint. */
+    /**
+     * Synchronize Player Position (play S2C 0x3C, protocol 763).
+     * Точный порядок из bytecode клиента 1.20.1 (ClientboundPlayerPositionPacket):
+     * x,y,z (double) -> yaw,pitch (float) -> relative-flags (byte) -> teleportId (VarInt, ПОСЛЕДНИЙ!).
+     * Поля velocity в пакете НЕТ (было ошибочно — клиент читал мусор после yaw/pitch).
+     */
     public function createPlayerPosition(float $x, float $y, float $z): string
     {
         $teleportId = ++$this->teleportIdCounter;
 
-        return VarInt::write($teleportId)                 // 1. Teleport ID
-            . pack('E', $x) . pack('E', $y) . pack('E', $z) // 2. Координаты (Double)
-            . pack('E', 0.0) . pack('E', 0.0) . pack('E', 0.0) // 3. Velocity (Double) — обязательно!
-            . pack('G', 0.0) . pack('G', 0.0)             // 4. Yaw, Pitch (Float)
-            . chr(0);                                      // 5. Flags (Byte)
+        return pack('E', $x) . pack('E', $y) . pack('E', $z) // x, y, z (Double)
+            . pack('G', 0.0) . pack('G', 0.0)                 // yaw, pitch (Float)
+            . chr(0)                                          // relative flags (Byte): всё ABSOLUTE
+            . VarInt::write($teleportId);                     // teleportId (VarInt) — последним!
     }
 
     /** Текущий ожидаемый teleport id (для подтверждения клиентом). */
@@ -1553,7 +1593,7 @@ final class PacketFactory
     /** Player Abilities (play S2C 0x34): flags i8 + flyingSpeed f32 + walkingSpeed f32. */
     public function createPlayerAbilities(): string
     {
-        return chr(0x01)                 // bit0 invulnerable| mayfly... 0x01 invulnerable, 0x02 fly, 0x04 instant break, 0x08 no clip
+        return chr(0x0D)                 // 0x01 invulnerable + 0x04 may-fly + 0x08 instabuild (creative)
             . pack('G', 0.05)
             . pack('G', 0.1);
     }
@@ -1568,6 +1608,18 @@ final class PacketFactory
     public function createSimulationDistance(int $distance): string
     {
         return VarInt::write($distance);
+    }
+
+    /** Set Center Chunk (play S2C 0x4E): chunkX varint + chunkZ varint. */
+    public function createChunkCacheCenter(int $chunkX, int $chunkZ): string
+    {
+        return VarInt::write($chunkX) . VarInt::write($chunkZ);
+    }
+
+    /** Set Render Distance (play S2C 0x4F): radius varint. */
+    public function createChunkCacheRadius(int $radius): string
+    {
+        return VarInt::write($radius);
     }
 
     /** Update Time (play S2C 0x5E): age i64 + time i64. */
@@ -2421,17 +2473,17 @@ final class MinecraftServer
             'SB_CONFIG_KNOWN_PACKS' => 0x06,
             'CB_CONFIG_FINISH_CONFIGURATION' => 0x02,
             'SB_CONFIG_ACKNOWLEDGE_FINISH_CONFIGURATION' => 0x02,
-            'CB_PLAY_LOGIN' => 0x29,
-            'CB_PLAY_SET_CONTAINER_CONTENT' => 0x27,
-            'CB_PLAY_PLAYER_POSITION' => 0x3A,
-            'CB_PLAY_KEEP_ALIVE' => 0x26,
-            'CB_PLAY_LEVEL_CHUNK_WITH_LIGHT' => 0x23,
-            'CB_PLAY_SYSTEM_CHAT' => 0x65,
+            'CB_PLAY_LOGIN' => 0x28,
+            'CB_PLAY_SET_CONTAINER_CONTENT' => 0x12,
+            'CB_PLAY_PLAYER_POSITION' => 0x3C,
+            'CB_PLAY_KEEP_ALIVE' => 0x23,
+            'CB_PLAY_LEVEL_CHUNK_WITH_LIGHT' => 0x24,
+            'CB_PLAY_SYSTEM_CHAT' => 0x64,
             'SB_PLAY_ACCEPT_TELEPORTATION' => 0x00,
-            'SB_PLAY_KEEP_ALIVE' => 0x15,
-            'SB_PLAY_MOVE_PLAYER_POS' => 0x17,
-            'SB_PLAY_MOVE_PLAYER_POS_ROT' => 0x18,
-            'SB_PLAY_MOVE_PLAYER_ROT' => 0x19,
+            'SB_PLAY_KEEP_ALIVE' => 0x12,
+            'SB_PLAY_MOVE_PLAYER_POS' => 0x14,
+            'SB_PLAY_MOVE_PLAYER_POS_ROT' => 0x15,
+            'SB_PLAY_MOVE_PLAYER_ROT' => 0x16,
         ];
 
         foreach ($requiredConstants as $const => $expectedValue) {
@@ -2787,24 +2839,30 @@ final class MinecraftServer
                 $this->packetFactory->createSetExperience()
             );
 
-            $this->connectionManager->sendPacket(
-                $clientId,
-                PacketId::PLAY_HURT_ANIMATION,
-                $this->packetFactory->createHurtArmor($entityId)
-            );
-
+            // HurtAnimation (0x21) при входе в мир не нужен — убран.
             $this->connectionManager->sendPacket(
                 $clientId,
                 PacketId::PLAY_SIMULATION_DISTANCE,
                 $this->packetFactory->createSimulationDistance($this->config->simulationDistance)
             );
 
+            // ВНИМАНИЕ: GameEvent type 13 ("start waiting for level chunks") появился
+            // только в 1.20.2! В 1.20.1 у GameEvent 12 значений (0..11) — type 13
+            // приводит к неизвестному событию у клиента. Не отправляем.
+
+            // Центр кэша чанков + радиус видимости (0x4E/0x4F) — ДО отправки чанков.
+            $centerX = ((int) floor($spawn['x'])) >> 4;
+            $centerZ = ((int) floor($spawn['z'])) >> 4;
             $this->connectionManager->sendPacket(
                 $clientId,
-                PacketId::PLAY_GAME_EVENT,
-                $this->packetFactory->createGameEvent(13, 0.0) // 13 = start waiting for level chunks
+                PacketId::CB_PLAY_SET_CHUNK_CACHE_CENTER,
+                $this->packetFactory->createChunkCacheCenter($centerX, $centerZ)
             );
-            PacketLogger::logInfo("Game Event 13 (start waiting for chunks) отправлен клиенту $clientId");
+            $this->connectionManager->sendPacket(
+                $clientId,
+                PacketId::CB_PLAY_SET_CHUNK_CACHE_RADIUS,
+                $this->packetFactory->createChunkCacheRadius($this->config->viewDistance)
+            );
 
             // Чанки отдаём СРАЗУ после Join Game — иначе клиент висит
             // «Downloading terrain». Отправка пачками по кругу событий.
