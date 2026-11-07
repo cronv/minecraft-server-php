@@ -138,7 +138,7 @@ final class PacketId
     public const CB_PLAY_BLOCK_EVENT = 0x09;
     public const CB_PLAY_BLOCK_UPDATE = 0x0A;
     public const CB_PLAY_BOSS_EVENT = 0x0B;
-    public const CB_PLAY_CHANGE_DIFFICULTY = 0x0C;
+    public const CB_PLAY_CHANGE_DIFFICULTY = 0x0A;
     public const CB_PLAY_CHUNK_BATCH_FINISHED = 0x0D;
     public const CB_PLAY_CHUNK_BATCH_START = 0x0E;
     public const CB_PLAY_CHUNK_BIOMES = 0x0F;
@@ -208,7 +208,7 @@ final class PacketId
     public const CB_PLAY_SET_CARRIED_ITEM = 0x4D;
     public const CB_PLAY_SET_CHUNK_CACHE_CENTER = 0x4E;
     public const CB_PLAY_SET_CHUNK_CACHE_RADIUS = 0x4F;
-    public const CB_PLAY_SET_DEFAULT_SPAWN_POSITION = 0x5A;
+    public const CB_PLAY_SET_DEFAULT_SPAWN_POSITION = 0x50;
     public const CB_PLAY_SET_DISPLAY_OBJECTIVE = 0x51;
     public const CB_PLAY_SET_ENTITY_DATA = 0x52;
     public const CB_PLAY_SET_ENTITY_LINK = 0x53;
