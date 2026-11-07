@@ -8,6 +8,19 @@ declare(strict_types=1);
  * Точка входа: php server.php
  *
  * ГЛАВНОЕ ИСПРАВЛЕНИЕ (клиент падал с DecoderException
+ * "y: Loading NBT data" сразу после Login Success):
+ * КОРНЕВОЙ NBT в Join Game (Registry Data) и в Chunk Data (Heightmaps)
+ * писался в формате 1.20.2+ — БЕЗ имени корневого тега. В Protocol 763
+ * (1.20.1) FriendlyByteBuf.readNbt() -> NbtIo.read() читает readByte()
+ * + readUTF() (ИМЯ КОРНЯ, пусть даже пустое) + payload; без 2 байт
+ * "00 00" клиент читает первые байты payload как длину имени и падает
+ * в NbtIo -> ReportedException("Loading NBT data"). Проверено по
+ * bytecode client.jar 1.20.1 (NbtIo.write: writeByte(tag) + writeUTF("")
+ * + payload). Исправление: вместо Nbt::networkRoot() (формат 1.20.2+)
+ * используем Nbt::root() (compound с ПУСТЫМ именем "00 00") в двух местах:
+ *   RegistryData::dimensionCodec() (Join Game) и heightmaps в createChunkData().
+ *
+ * ПРЕДЫДУЩЕЕ ИСПРАВЛЕНИЕ (клиент падал с DecoderException
  * "Packet 41 (wj) was larger than I expected, found 19190 bytes extra"):
  * вся таблица Clientbound Play ID была составлена по 1.20.2+! В 1.20.1
  * (проверено по bytecode client.jar 1.20.1, порядок регистрации пакетов):
@@ -1164,7 +1177,11 @@ final class RegistryData
         }
 
         // В 1.19.3 - 1.20.1 структура ОБЕРНУТА в type/value!
-        self::$dimensionCodec = Nbt::networkRoot(function (Nbt $n): void {
+        // ВАЖНО: Nbt::root() = compound с ПУСТЫМ именем ("0A 00 00...") —
+        // клиент 1.20.1 читает корень через NbtIo.read(): readByte + readUTF(имя) + payload.
+        // Nbt::networkRoot() (без имени) — это формат 1.20.2+, он вызывает
+        // DecoderException "Loading NBT data" на клиенте 1.20.1!
+        self::$dimensionCodec = Nbt::root(function (Nbt $n): void {
             $n->compound('minecraft:dimension_type', function (Nbt $reg): void {
                 $reg->string('type', 'minecraft:dimension_type')
                     ->listCompound('value', self::dimensionEntries());
@@ -1492,8 +1509,12 @@ final class PacketFactory
 
         $data = pack('NN', $chunkX, $chunkZ);
 
-        // Heightmaps: LongArrayTag "WORLD_SURFACE" и "MOTION_BLOCKING" (36 нулевых long)
-        $hm = Nbt::networkRoot(function (Nbt $n): void {
+        // Heightmaps: LongArrayTag "WORLD_SURFACE" и "MOTION_BLOCKING" (36 нулевых long).
+        // Клиент 1.20.1 (LevelChunk.read): heightmaps.contains(key, 12) + getLongArray(key),
+        // т.е. значения РОВНО TAG_Long_Array под корневым компаундом.
+        // Корень — Nbt::root() (compound С пустым именем "00 00"): NbtIo.read() 1.20.1
+        // читает readByte + readUTF; networkRoot() без имени = DecoderException "Loading NBT data".
+        $hm = Nbt::root(function (Nbt $n): void {
             $heights = array_fill(0, 36, 0);
             $n->longArray('WORLD_SURFACE', $heights)
                 ->longArray('MOTION_BLOCKING', $heights);
@@ -1506,7 +1527,10 @@ final class PacketFactory
         for ($s = 0; $s < 24; $s++) {
             if ($s === 0) {
                 // Секция 0: бедрок на нижнем слое (non-air block count = 256)
-                $palette = VarInt::write(2) . VarInt::write(0) . VarInt::write(31); // air(0), bedrock(31)
+                // Палитра indirect: воздух(0) + бедрок. Global block state id
+                // bedrock в 1.20.1 = 79 (проверено по minecraft-data blocks.json),
+                // а НЕ 31 (31 = jungle_sapling — клиент рисовал саженцы!).
+                $palette = VarInt::write(2) . VarInt::write(0) . VarInt::write(79); // air(0), bedrock(79)
                 $longs = 256; // 4 бита * 4096 блоков / 64
                 $words = array_fill(0, $longs, 0);
                 for ($i = 0; $i < 256; $i++) {
@@ -2641,7 +2665,7 @@ final class MinecraftServer
     /**
      * Быстрый первый Keep Alive: через ~2 секунды после входа в Play,
      * чтобы тестовые клиенты (с коротким окном чтения) успевали получить
-     * CB Play Keep Alive (0x22) без ожидания 15-секундного тика.
+     * CB Play Keep Alive (0x23) без ожидания 15-секундного тика.
      */
     private function tickEarlyKeepAlives(): void
     {
@@ -2661,7 +2685,7 @@ final class MinecraftServer
                 $keepAlive = $this->packetFactory->createKeepAlive();
                 $connection->pendingKeepAliveId = unpack('J', $keepAlive)[1];
                 $this->connectionManager->sendPacket($clientId, PacketId::PLAY_KEEP_ALIVE, $keepAlive);
-                PacketLogger::logInfo("⏱️ Early Keep Alive (0x22) отправлен клиенту $clientId");
+                PacketLogger::logInfo("⏱️ Early Keep Alive (0x23) отправлен клиенту $clientId");
             }
         }
     }
@@ -2788,7 +2812,7 @@ final class MinecraftServer
                 PacketId::PLAY_PLAYER_INFO,
                 $this->packetFactory->createPlayerInfoAdd($connection->uuid, $connection->username)
             );
-            PacketLogger::logInfo("Player Info Add (0x38) отправлен клиенту $clientId");
+            PacketLogger::logInfo("Player Info Add (0x3A) отправлен клиенту $clientId");
 
             $this->connectionManager->sendPacket(
                 $clientId,
@@ -2813,7 +2837,7 @@ final class MinecraftServer
                 PacketId::PLAY_POSITION,
                 $this->packetFactory->createPlayerPosition($spawn['x'], $spawn['y'], $spawn['z'])
             );
-            PacketLogger::logInfo("Position (teleport, 0x3A) отправлен клиенту $clientId");
+            PacketLogger::logInfo("Position (teleport, 0x3C) отправлен клиенту $clientId");
 
             $this->connectionManager->sendPacket(
                 $clientId,
@@ -2868,7 +2892,7 @@ final class MinecraftServer
             // «Downloading terrain». Отправка пачками по кругу событий.
             $this->sendChunksIfNeeded($connection);
 
-            // Первый Keep Alive (0x22) отправляем СРАЗУ после чанков, не
+            // Первый Keep Alive (0x23) отправляем СРАЗУ после чанков, не
             // дожидаясь 15-секундного тика: тестовые клиенты с коротким
             // окном чтения проверяют его наличие в стартовой последовательности.
             if ($connection->pendingKeepAliveId === null) {
@@ -2879,7 +2903,7 @@ final class MinecraftServer
                     PacketId::PLAY_KEEP_ALIVE,
                     $keepAlive
                 );
-                PacketLogger::logInfo("⏱️ Initial Keep Alive (0x22) отправлен клиенту $clientId");
+                PacketLogger::logInfo("⏱️ Initial Keep Alive (0x23) отправлен клиенту $clientId");
             }
 
             $this->connectionManager->sendPacket(
