@@ -1041,7 +1041,6 @@ final class RegistryData
                                             ->int('max_inclusive', 7);
                                     });
                             })
-
                             ->int('monster_spawn_block_light_limit', 0);
                     });
             },
@@ -1165,7 +1164,8 @@ final class RegistryData
                     ->compound('monster_spawn_light_level', function (Nbt $p): void {
                         $p->string('type', 'minecraft:uniform')
                             ->compound('value', function (Nbt $v): void {
-                                $v->int('min_inclusive', 0)->int('max_inclusive', 7);
+                                $v->int('min_inclusive', 0)
+                                    ->int('max_inclusive', 7);
                             });
                     })
                     ->int('monster_spawn_block_light_limit', 0);
