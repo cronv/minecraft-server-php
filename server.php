@@ -2319,6 +2319,32 @@ final class PlayHandler implements PacketHandler
                 // переход); игнорируем повторно.
                 return;
 
+            case PacketId::SB_PLAY_CHAT: // Serverbound Play: Chat Message (в 1.20.1 это ID 0x05)
+                // 1. Читаем само сообщение (String). Оно идет первым полем в пакете.
+                // Остальные поля (Timestamp, Salt, Signature) мы просто игнорируем.
+                $message = StringHandler::read($packetData, $offset);
+
+                if ($message === '') {
+                    return; // Игнорируем пустые сообщения
+                }
+
+                PacketLogger::logInfo("💬 [ЧАТ] <{$connection->username}> {$message}");
+
+                // 2. Формируем текст для рассылки
+                $chatText = "<{$connection->username}> {$message}";
+
+                // 3. Упаковываем в System Chat Message:
+                // [String JSON] + [Boolean Overlay (0 = обычный чат, 1 = actionbar)]
+                $jsonPayload = StringHandler::write(json_encode(['text' => $chatText], JSON_UNESCAPED_UNICODE)) . chr(0);
+
+                // 4. Рассылаем ВСЕМ игрокам, которые уже находятся в мире (состояние Play)
+                foreach ($this->connections->getConnections() as $targetId => $targetConn) {
+                    if ($targetConn->state === ProtocolState::Play) {
+                        $this->connections->sendPacket($targetId, PacketId::CB_PLAY_SYSTEM_CHAT, $jsonPayload);
+                    }
+                }
+                return;
+
             case PacketId::SB_PLAY_ACCEPT_TELEPORTATION:
                 $confirmId = VarInt::read($packetData, $offset);
                 PacketLogger::logInfo("Teleport Confirm от клиента {$connection->id}: id=$confirmId");
