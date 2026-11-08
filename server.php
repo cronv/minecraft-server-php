@@ -20,6 +20,26 @@ declare(strict_types=1);
  * используем Nbt::root() (compound с ПУСТЫМ именем "00 00") в двух местах:
  *   RegistryData::dimensionCodec() (Join Game) и heightmaps в createChunkData().
  *
+ * ДОКАЗАТЕЛЬСТВО ФОРМАТА РЕЕСТРОВ (disassembly client.jar 1.20.1,
+ * классы RegistrySynchronization (hv) / RegistryCodecs (ht)):
+ *   Join Game читает реестры через readWithCodec(BUILTIN_CONTEXT_OPS,
+ *   RegistrySynchronization.NETWORK_CODEC), а NETWORK_CODEC =
+ *   Codec.unboundedMap(ResourceKey, {type, value: [{name, id, element}]}).
+ *   unboundedMap декодирует ЛЮБОЕ подмножество реестров (неизвестный ключ
+ *   реестра -> DecoderException, отсутствующий известный -> OK), поэтому
+ *   достаточно minecraft:dimension_type + minecraft:worldgen/biome —
+ *   chat_type / trim_pattern / trim_material клиенту при входе НЕ требуются.
+ *   НО minecraft:damage_type ОБЯЗАТЕЛЕН: конструктор ClientLevel ->
+ *   DamageSources -> registryOrThrow(Registries.DAMAGE_TYPE) + 23 прямых
+ *   поиска ключей (in_fire, lightning_bolt, ...). Без реестра задача
+ *   handleLogin падает («Error executing task on Client: Missing registry
+ *   minecraft:damage_type»), экран «Подключение к миру...» висит вечно,
+ *   а чанки дают NPE «few.i() because this.n is null».
+ *   Вывод PHP проверен байт-в-байт строгим парсером NbtIo.read
+ *   (scripts/verify_php_bytes.py, scripts/verify_joingame.py) и
+ *   ЗАПУСКОМ НАСТОЯЩЕГО КЛИЕНТА 1.20.1 против сервера (см. scripts/run_mc_client.sh).
+ *   Также: isFlat теперь 1 (мир плоский; клиент по нему строит уровень).
+ *
  * ПРЕДЫДУЩЕЕ ИСПРАВЛЕНИЕ (клиент падал с DecoderException
  * "Packet 41 (wj) was larger than I expected, found 19190 bytes extra"):
  * вся таблица Clientbound Play ID была составлена по 1.20.2+! В 1.20.1
@@ -34,7 +54,7 @@ declare(strict_types=1);
  * Другие исправления: Join Game дописаны 4 обязательных поля (isDebug, isFlat,
  * lastDeathLocation, portalCooldown — читаются клиентом последними); в чанках
  * добавлены БИОМЫ каждой секции (bits=0, single-value, plains=35), heightmaps
- * стали настоящим LongArrayTag (WORLD_SURFACE + MOTION_BLOCKING, 36 long), air
+ * стали настоящим LongArrayTag (WORLD_SURFACE + MOTION_BLOCKING, 37 long), air
  * ID = 0 (был 1 = stone), sky light = 0xFF (мир больше не чёрный); Declare
  * Commands минимальное валидное дерево (rootIndex последним полем); убраны
  * GameEvent 13 (нет в 1.20.1!) и Hurt Animation при входе; добавлены
@@ -392,7 +412,7 @@ final class PacketId
     public const PLAY_LIMITED_PACKET_SIZE = self::CB_PLAY_SERVER_DATA;           // 0x45
     public const PLAY_SET_TITLE_TEXT = self::CB_PLAY_SET_TITLE_TEXT;             // 0x5F
     public const PLAY_ADD_PLAYER = self::CB_PLAY_ADD_PLAYER;                     // 0x03
-    public const PLAY_JOIN_GAME = self::CB_PLAY_LOGIN;                           // 0x29 (Join Game, Protocol 763)
+    public const PLAY_JOIN_GAME = self::CB_PLAY_LOGIN;                           // 0x28 (Join Game, Protocol 763)
     public const PLAY_PLAYER_POSITION = self::CB_PLAY_PLAYER_POSITION;           // 0x3A
     public const PLAY_PLAYER_ABILITIES = self::CB_PLAY_PLAYER_ABILITIES;         // 0x32
     public const PLAY_PLAYER_COMPOSITION = self::CB_PLAY_SET_EQUIPMENT;          // 0x55
@@ -953,8 +973,14 @@ final class Nbt
     }
 
     /**
-     * Network NBT (1.13+): корневой тег Compound БЕЗ имени.
+     * Network NBT (1.20.2+): корневой тег Compound БЕЗ имени.
      * Формат: [Type=0x0A][Payload][Type=0x00 (End)]
+     *
+     * ВНИМАНИЕ: для Protocol 763 (1.20.1) НЕ ИСПОЛЬЗОВАТЬ! Клиент 1.20.1 читает
+     * корень через NbtIo.read() (readByte + readUTF-имя + payload) и без 2 байт
+     * имени падает с ReportedException("Loading NBT data"). Для 1.20.1
+     * используйте Nbt::root() (compound с ПУСТЫМ именем). Метод оставлен
+     * только как документация различий форматов.
      */
     public static function networkRoot(callable $fn): string
     {
@@ -1049,10 +1075,77 @@ final class RegistryData
         ['name' => 'ice_spikes', 'precipitation' => true, 'temperature' => 0.0, 'downfall' => 0.5],
     ];
 
-    /** @var string[] Обязательные реестры, которые клиент 1.20.1 читает при входе. */
+    /** @var string[] Обязательные реестры, которые клиент 1.20.1 читает при входе.
+     *
+     * ВАЖНО: minecraft:damage_type ОБЯЗАТЕЛЕН! Конструктор ClientLevel (1.20.1)
+     * вызывает registryOrThrow(Registries.DAMAGE_TYPE) (уровень DamageSources).
+     * Без этого реестра handleLogin падает с IllegalStateException
+     * «Missing registry: minecraft:damage_type», задача проглатывается клиентом
+     * («Error executing task on Client»), экран «Подключение к миру...» висит вечно.
+     */
     private const REQUIRED_REGISTRIES = [
         'minecraft:dimension_type' => self::class . '::dimensionEntries',
         'minecraft:worldgen/biome' => self::class . '::biomeEntries',
+        'minecraft:damage_type' => self::class . '::damageTypeEntries',
+    ];
+
+    /**
+     * Vanilla 1.20.1 damage types (44 шт.) — точные значения из
+     * data/minecraft/damage_type ванильного сервера 1.20.1.
+     * Формат записи: [имя, message_id, scaling, exhaustion].
+     * Клиент при создании уровня (DamageSources) требует наличия минимум
+     * in_fire, lightning_bolt, on_fire, lava, hot_floor, in_wall, cramming,
+     * drown, starve, cactus, fall, fly_into_wall, out_of_world, magic, wither,
+     * dragon_breath, dry_out, sweet_berry_bush, freeze, falling_stalactite,
+     * falling_block, stalagmite, sting — отсутствие любого из них =
+     * IllegalStateException «Missing key ... damage_type» и вечный
+     * экран «Подключение к миру...».
+     */
+    private const DAMAGE_TYPES = [
+        'arrow', 'arrow', 'when_caused_by_living_non_player', 0.1,
+        'bad_respawn_point', 'badRespawnPoint', 'always', 0.1,
+        'cactus', 'cactus', 'when_caused_by_living_non_player', 0.1,
+        'cramming', 'cramming', 'when_caused_by_living_non_player', 0.0,
+        'dragon_breath', 'dragonBreath', 'when_caused_by_living_non_player', 0.0,
+        'drown', 'drown', 'when_caused_by_living_non_player', 0.0,
+        'dry_out', 'dryout', 'when_caused_by_living_non_player', 0.1,
+        'explosion', 'explosion', 'always', 0.1,
+        'fall', 'fall', 'when_caused_by_living_non_player', 0.0,
+        'falling_anvil', 'anvil', 'when_caused_by_living_non_player', 0.1,
+        'falling_block', 'fallingBlock', 'when_caused_by_living_non_player', 0.1,
+        'falling_stalactite', 'fallingStalactite', 'when_caused_by_living_non_player', 0.1,
+        'fireball', 'fireball', 'when_caused_by_living_non_player', 0.1,
+        'fireworks', 'fireworks', 'when_caused_by_living_non_player', 0.1,
+        'fly_into_wall', 'flyIntoWall', 'when_caused_by_living_non_player', 0.0,
+        'freeze', 'freeze', 'when_caused_by_living_non_player', 0.0,
+        'generic', 'generic', 'when_caused_by_living_non_player', 0.0,
+        'generic_kill', 'genericKill', 'when_caused_by_living_non_player', 0.0,
+        'hot_floor', 'hotFloor', 'when_caused_by_living_non_player', 0.1,
+        'in_fire', 'inFire', 'when_caused_by_living_non_player', 0.1,
+        'in_wall', 'inWall', 'when_caused_by_living_non_player', 0.0,
+        'indirect_magic', 'indirectMagic', 'when_caused_by_living_non_player', 0.0,
+        'lava', 'lava', 'when_caused_by_living_non_player', 0.1,
+        'lightning_bolt', 'lightningBolt', 'when_caused_by_living_non_player', 0.1,
+        'magic', 'magic', 'when_caused_by_living_non_player', 0.0,
+        'mob_attack', 'mob', 'when_caused_by_living_non_player', 0.1,
+        'mob_attack_no_aggro', 'mob', 'when_caused_by_living_non_player', 0.1,
+        'mob_projectile', 'mob', 'when_caused_by_living_non_player', 0.1,
+        'on_fire', 'onFire', 'when_caused_by_living_non_player', 0.0,
+        'out_of_world', 'outOfWorld', 'when_caused_by_living_non_player', 0.0,
+        'outside_border', 'outsideBorder', 'when_caused_by_living_non_player', 0.0,
+        'player_attack', 'player', 'when_caused_by_living_non_player', 0.1,
+        'player_explosion', 'explosion.player', 'always', 0.1,
+        'sonic_boom', 'sonic_boom', 'always', 0.0,
+        'stalagmite', 'stalagmite', 'when_caused_by_living_non_player', 0.0,
+        'starve', 'starve', 'when_caused_by_living_non_player', 0.0,
+        'sting', 'sting', 'when_caused_by_living_non_player', 0.1,
+        'sweet_berry_bush', 'sweetBerryBush', 'when_caused_by_living_non_player', 0.1,
+        'thorns', 'thorns', 'when_caused_by_living_non_player', 0.1,
+        'thrown', 'thrown', 'when_caused_by_living_non_player', 0.1,
+        'trident', 'trident', 'when_caused_by_living_non_player', 0.1,
+        'unattributed_fireball', 'onFire', 'when_caused_by_living_non_player', 0.1,
+        'wither', 'wither', 'when_caused_by_living_non_player', 0.0,
+        'wither_skull', 'witherSkull', 'when_caused_by_living_non_player', 0.1,
     ];
 
     private static ?string $registryPayload = null;
@@ -1094,6 +1187,25 @@ final class RegistryData
                     });
             },
         ];
+    }
+
+    /** @return array<int, callable> Записи реестра minecraft:damage_type. */
+    public static function damageTypeEntries(): array
+    {
+        $callbacks = [];
+        foreach (array_chunk(self::DAMAGE_TYPES, 4) as $id => [$name, $messageId, $scaling, $exhaustion]) {
+            $callbacks[] = static function (Nbt $n) use ($id, $name, $messageId, $scaling, $exhaustion): void {
+                $n->int('id', $id)
+                    ->string('name', 'minecraft:' . $name)
+                    ->compound('element', function (Nbt $e) use ($messageId, $scaling, $exhaustion): void {
+                        $e->string('message_id', $messageId)
+                            ->string('scaling', $scaling)
+                            ->float('exhaustion', $exhaustion);
+                    });
+            };
+        }
+
+        return $callbacks;
     }
 
     /** @return array<int, callable> */
@@ -1139,31 +1251,6 @@ final class RegistryData
         };
     }
 
-    /** Корневой NBT одной записи dimension_type (overworld, 1.20.1). */
-    public static function overworldDimension(): string
-    {
-        static $cached = null;
-
-        return $cached ??= Nbt::root(function (Nbt $n): void {
-            $n->compound('element', function (Nbt $e): void {
-                $e->byte('ultrawarm', 0)
-                    ->byte('natural', 1)
-                    ->double('coordinate_scale', 1.0)
-                    ->float('ambient_light', 0.0) // в вики это Float, не Double
-                    ->byte('has_ceiling', 0)
-                    ->byte('has_skylight', 1)
-                    ->byte('piglin_safe', 0)
-                    ->byte('bed_works', 1)
-                    ->byte('respawn_anchor_works', 0)
-                    ->byte('has_raids', 1)
-                    ->int('logical_height', 384)
-                    ->string('infiniburn', '#minecraft:infiniburn_overworld')
-                    ->string('effects', 'minecraft:overworld');
-            })
-                ->int('id', 0)
-                ->string('name', 'minecraft:overworld');
-        });
-    }
 
     /**
      * Payload пакета Sync Registries (play S2C 0x39 в 1.20.1 отсутствует —
@@ -1190,97 +1277,15 @@ final class RegistryData
                 $reg->string('type', 'minecraft:worldgen/biome')
                     ->listCompound('value', self::biomeEntries());
             });
+            $n->compound('minecraft:damage_type', function (Nbt $reg): void {
+                $reg->string('type', 'minecraft:damage_type')
+                    ->listCompound('value', self::damageTypeEntries());
+            });
         });
 
         return self::$dimensionCodec;
     }
 
-    public static function getDimensionTypeEntries(): array
-    {
-        return [
-            'minecraft:overworld' => Nbt::networkRoot(function (Nbt $n): void {
-                $n->byte('ultrawarm', 0)
-                    ->byte('natural', 1)
-                    ->double('coordinate_scale', 1.0)
-                    ->float('ambient_light', 0.0)
-                    ->byte('has_ceiling', 0)
-                    ->byte('has_skylight', 1)
-                    ->byte('piglin_safe', 0)
-                    ->byte('bed_works', 1)
-                    ->byte('respawn_anchor_works', 0)
-                    ->byte('has_raids', 1)
-                    ->int('min_y', -64)
-                    ->int('height', 384)
-                    ->int('logical_height', 384)
-                    ->string('infiniburn', '#minecraft:infiniburn_overworld')
-                    ->string('effects', 'minecraft:overworld')
-                    ->compound('monster_spawn_light_level', function (Nbt $p): void {
-                        $p->string('type', 'minecraft:uniform')
-                            ->compound('value', function (Nbt $v): void {
-                                $v->int('min_inclusive', 0)
-                                    ->int('max_inclusive', 7);
-                            });
-                    })
-                    ->int('monster_spawn_block_light_limit', 0);
-            })
-        ];
-    }
-
-    public static function getBiomeEntries(): array
-    {
-        $entries = [];
-        foreach (self::BIOMES as $biome) {
-            $name = 'minecraft:' . $biome['name'];
-            $precip = $biome['precipitation'] ? 'rain' : 'none';
-            $temp = $biome['temperature'];
-            $down = $biome['downfall'];
-
-            $entries[$name] = Nbt::networkRoot(function (Nbt $n) use ($precip, $temp, $down): void {
-                $n->string('precipitation', $precip)
-                    ->float('temperature', $temp)
-                    ->float('downfall', $down)
-                    ->compound('effects', function (Nbt $fx): void {
-                        $fx->int('sky_color', 7907327)
-                            ->int('fog_color', 12638463)
-                            ->int('water_color', 4159204)
-                            ->int('water_fog_color', 329011)
-                            ->compound('mood_sound', function (Nbt $ms): void {
-                                $ms->string('sound', 'minecraft:ambient.cave')
-                                    ->int('tick_delay', 6000)
-                                    ->int('block_search_extent', 8)
-                                    ->double('offset', 2.0);
-                            });
-                    });
-            });
-        }
-        return $entries;
-    }
-
-    public static function getChatTypeEntries(): array
-    {
-        return [
-            'minecraft:chat' => Nbt::networkRoot(function (Nbt $n): void {
-                $n->compound('chat', function (Nbt $c): void {
-                    $c->string('translation_key', 'chat.type.text')
-                        ->listString('parameters', ['sender', 'content']);
-                })->compound('narration', function (Nbt $c): void {
-                    $c->string('translation_key', 'chat.type.text.narrate')
-                        ->listString('parameters', ['sender', 'content']);
-                });
-            })
-        ];
-    }
-
-    public static function getDamageTypeEntries(): array
-    {
-        return [
-            'minecraft:generic' => Nbt::networkRoot(function (Nbt $n): void {
-                $n->string('message_id', 'generic')
-                    ->float('exhaustion', 0.0)
-                    ->string('scaling', 'when_caused_by_living_non_player');
-            })
-        ];
-    }
 
     private function __construct()
     {
@@ -1360,7 +1365,7 @@ final class PacketFactory
     }
 
     /**
-     * Join Game (play S2C 0x29, protocol 763).
+     * Join Game (play S2C 0x28, protocol 763).
      *
      * Порядок полей строго по packet_login из minecraft-data 1.20:
      * entityId(i32) isHardcore(bool) gameMode(u8) previousGameMode(i8)
@@ -1393,7 +1398,7 @@ final class PacketFactory
         $data .= chr(0);                              // reducedDebugInfo
         $data .= chr(1);                              // enableRespawnScreen
         $data .= chr(0);                              // isDebug
-        $data .= chr(0);                              // isFlat
+        $data .= chr(1);                              // isFlat (плоский мир — TRUE)
 
         $data .= chr(0);                              // death location: absent
         $data .= VarInt::write(0);                    // portalCooldown
@@ -1492,8 +1497,10 @@ final class PacketFactory
      *   [short nonAirCount][byte bitsPerEntry][палитра][VarInt longCount + longs][БИОМЫ: та же структура]
      *   - bits=0: single-value палитра (1 VarInt) + ВСЕГДА VarInt longCount (=0);
      *   - биомы ОБЯЗАТЕЛЬНЫ в каждой секции (иначе десинхронизация парсера).
-     * Heightmaps: Compound из LongArrayTag (WORLD_SURFACE + MOTION_BLOCKING, 36 long:
-     * 256 колонок × 9 бит). Другой тип тега -> RuntimeException клиента.
+     * Heightmaps: Compound из LongArrayTag (WORLD_SURFACE + MOTION_BLOCKING, 37 long:
+     * 9 бит/значение, floor(64/9)=7 значений на long → ceil(256/7)=37).
+     * Иначе клиент логирует «Ignoring heightmap data … expected: 37, got: 36».
+     * Другой тип тега -> RuntimeException клиента.
      */
     public function createChunkData(int $chunkX, int $chunkZ): string
     {
@@ -1509,13 +1516,15 @@ final class PacketFactory
 
         $data = pack('NN', $chunkX, $chunkZ);
 
-        // Heightmaps: LongArrayTag "WORLD_SURFACE" и "MOTION_BLOCKING" (36 нулевых long).
+        // Heightmaps: LongArrayTag "WORLD_SURFACE" и "MOTION_BLOCKING" (37 нулевых long).
+        // Разбиение клиента: bits=ceil(log2(385))=9, значений на long=floor(64/9)=7,
+        // longs=ceil(256/7)=37 — при 36 клиент пишет "Ignoring heightmap data".
         // Клиент 1.20.1 (LevelChunk.read): heightmaps.contains(key, 12) + getLongArray(key),
         // т.е. значения РОВНО TAG_Long_Array под корневым компаундом.
         // Корень — Nbt::root() (compound С пустым именем "00 00"): NbtIo.read() 1.20.1
         // читает readByte + readUTF; networkRoot() без имени = DecoderException "Loading NBT data".
         $hm = Nbt::root(function (Nbt $n): void {
-            $heights = array_fill(0, 36, 0);
+            $heights = array_fill(0, 37, 0);
             $n->longArray('WORLD_SURFACE', $heights)
                 ->longArray('MOTION_BLOCKING', $heights);
         });
