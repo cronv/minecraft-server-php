@@ -1299,7 +1299,7 @@ final class RegistryData
 final class WorldGenerator
 {
     public const SPAWN_X = 0.5;
-    public const SPAWN_Y = -63.0;
+    public const SPAWN_Y = -61.0;
     public const SPAWN_Z = 0.5;
 
     /** Радиус чанков вокруг спавна, которые генерируются лениво (memory-safe). */
