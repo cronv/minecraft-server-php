@@ -40,6 +40,17 @@ declare(strict_types=1);
  *   ЗАПУСКОМ НАСТОЯЩЕГО КЛИЕНТА 1.20.1 против сервера (см. scripts/run_mc_client.sh).
  *   Также: isFlat теперь 1 (мир плоский; клиент по нему строит уровень).
  *
+ * ДОБАВЛЕНО: ГРАНИЦА МИРА по краям уже сгенерированного мира.
+ *   Initialize World Border (0x22) отправляется после Spawn Position и до
+ *   телепорта (как в ванилле). Геометрия вычисляется из WorldGenerator::
+ *   CHUNK_RADIUS (4): чанки -4..+4 = блоки -64..79, стены границы на -64 и 80:
+ *   центр (8.0, 8.0), диаметр 144.0, скорость 0 (статичная), ванильные
+ *   предупреждения (5 блоков / 15 сек). Структура пакета сверена с
+ *   minecraft-data 763: x f64, z f64, oldDiam f64, newDiam f64, speed VarInt,
+ *   portalTeleportBoundary VarInt (29999984), warningBlocks VarInt (5),
+ *   warningTime VarInt (15). Клиент рисует стену и локально блокирует выход.
+ *   Если измените CHUNK_RADIUS — граница пересчитается автоматически.
+ *
  * ПРЕДЫДУЩЕЕ ИСПРАВЛЕНИЕ (клиент падал с DecoderException
  * "Packet 41 (wj) was larger than I expected, found 19190 bytes extra"):
  * вся таблица Clientbound Play ID была составлена по 1.20.2+! В 1.20.1
@@ -213,6 +224,12 @@ final class PacketId
     public const CB_PLAY_EXPLOSION = 0x1D;
     public const CB_PLAY_FORGET_LEVEL_CHUNK = 0x1E;
     public const CB_PLAY_GAME_EVENT = 0x1F;
+    /** Initialize World Border (play S2C 0x22): полный стат границы мира.
+     *  x f64, z f64, oldDiameter f64, newDiameter f64, speed VarInt,
+     *  portalTeleportBoundary VarInt, warningBlocks VarInt, warningTime VarInt.
+     *  Структура сверена с minecraft-data 763 (packet_initialize_world_border).
+     */
+    public const CB_PLAY_INITIALIZE_WORLD_BORDER = 0x22;
     public const CB_PLAY_KEEP_ALIVE = 0x23;
     public const CB_PLAY_LEVEL_CHUNK_WITH_LIGHT = 0x24;
     public const CB_PLAY_LEVEL_EVENT = 0x25;
@@ -1313,6 +1330,34 @@ final class WorldGenerator
             'spawn' => ['x' => self::SPAWN_X, 'y' => self::SPAWN_Y, 'z' => self::SPAWN_Z],
         ];
     }
+
+    /**
+     * Граница мира по краям уже сгенерированной области.
+     *
+     * Генерация покрывает чанки [-CHUNK_RADIUS .. +CHUNK_RADIUS] вокруг чанка (0,0),
+     * т.е. блоки [-CHUNK_RADIUS*16 .. (CHUNK_RADIUS+1)*16) = [-64 .. 80) при радиусе 4.
+     * Ванильная граница — квадрат с центром (centerX, centerZ) и диаметром D:
+     * стены на centerX ± D/2. Ставим их ровно на край сгенерированных блоков:
+     *   center = (minBlock + maxBlock) / 2 = 8.0
+     *   diameter = maxBlock - minBlock = 144.0
+     * Игрок упирается в стену точно на границе чанка -4/+4 и не выходит
+     * в несгенерированную область.
+     *
+     * @return array{centerX: float, centerZ: float, diameter: float, minBlock: int, maxBlock: int}
+     */
+    public static function worldBorder(): array
+    {
+        $minBlock = -self::CHUNK_RADIUS * 16;          // -64 (левый край чанка -4)
+        $maxBlock = (self::CHUNK_RADIUS + 1) * 16;     // 80 (правый край чанка +4)
+
+        return [
+            'centerX' => ($minBlock + $maxBlock) / 2.0,   // 8.0
+            'centerZ' => ($minBlock + $maxBlock) / 2.0,   // 8.0
+            'diameter' => (float) ($maxBlock - $minBlock), // 144.0
+            'minBlock' => $minBlock,
+            'maxBlock' => $maxBlock,
+        ];
+    }
 }
 
 // ============================================================================
@@ -1653,6 +1698,40 @@ final class PacketFactory
     public function createChunkCacheRadius(int $radius): string
     {
         return VarInt::write($radius);
+    }
+
+    /**
+     * Initialize World Border (play S2C 0x22).
+     *
+     * Полный стат границы: центр (x, z), старый/новый диаметры, скорость
+     * расширения (0 = статичная), граница портала, предупреждения.
+     * Ванильные значения по умолчанию: portalTeleportBoundary = 29999984,
+     * warningBlocks = 5, warningTime = 15 (сек).
+     * Клиент 1.20.1 по этому пакету рисует красную стену и локально
+     * блокирует движение за её пределами — серверный clamp не требуется.
+     */
+    public function createInitializeWorldBorder(float $centerX, float $centerZ, float $diameter): string
+    {
+        return pack('E', $centerX)
+            . pack('E', $centerZ)
+            . pack('E', $diameter)      // oldDiameter
+            . pack('E', $diameter)      // newDiameter (без анимации: old == new, speed = 0)
+            . VarInt::write(0)          // speed (блоков/сек при lerp; 0 = статичная)
+            . VarInt::write(29999984)   // portalTeleportBoundary (ваниль)
+            . VarInt::write(5)          // warningBlocks (красная зона у стены)
+            . VarInt::write(15);        // warningTime (сек, предупреждение при сжатии)
+    }
+
+    /** Set Border Center (play S2C 0x47): x f64 + z f64 (на случай обновления центра). */
+    public function createSetBorderCenter(float $centerX, float $centerZ): string
+    {
+        return pack('E', $centerX) . pack('E', $centerZ);
+    }
+
+    /** Set Border Size (play S2C 0x49): diameter f64 (на случай обновления размера). */
+    public function createSetBorderSize(float $diameter): string
+    {
+        return pack('E', $diameter);
     }
 
     /** Update Time (play S2C 0x5E): age i64 + time i64. */
@@ -2866,6 +2945,30 @@ final class MinecraftServer
                 PacketId::PLAY_SPAWN_POSITION,
                 $this->packetFactory->createSpawnPosition(0, -64, 0)
             );
+
+            // Граница мира по краям уже сгенерированной области (чанки -4..+4 →
+            // блоки -64..79 → центр (8, 8), диаметр 144). Как в ванилле: один
+            // Initialize World Border (0x22) после Spawn Position и до телепорта.
+            // Клиент рисует красную стену и локально не пускает игрока дальше.
+            $border = WorldGenerator::worldBorder();
+            $this->connectionManager->sendPacket(
+                $clientId,
+                PacketId::CB_PLAY_INITIALIZE_WORLD_BORDER,
+                $this->packetFactory->createInitializeWorldBorder(
+                    $border['centerX'],
+                    $border['centerZ'],
+                    $border['diameter']
+                )
+            );
+            PacketLogger::logInfo(sprintf(
+                '🌍 Граница мира (0x22) отправлена клиенту %d: центр (%.1f, %.1f), диаметр %.1f (блоки %d..%d)',
+                $clientId,
+                $border['centerX'],
+                $border['centerZ'],
+                $border['diameter'],
+                $border['minBlock'],
+                $border['maxBlock'] - 1
+            ));
 
             $this->connectionManager->sendPacket(
                 $clientId,
